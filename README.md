@@ -1,25 +1,24 @@
 # tiny-vllm
-High performance LLM inference engine, a younger sibling of vLLM, written in C++ and CUDA
+High performance minimal LLM inference engine, a younger sibling of vLLM, written in scratch C++ and CUDA
 
-what I implement:
+I build the project based on the vLLM paper [Efficient Memory Management for Large Language
+Model Serving with PagedAttention](https://arxiv.org/pdf/2309.06180)
 
 - load a LLM model from safetensors
-- forward pass
-- basic K/V cache
+- full LLM forward pass
+- CUDA kernels for attention etc
+- KV cache as described in the paper
 - PagedAttention
 - batching
 
-what I use:
+External libraries:
 
 - cuBLAS for all GEMMs
-- tokenizer from hf transformers
+- tokenizer from HuggingFace Transformers
 
-some design choices:
-- fp16
-- goal is to maximize tok/s
+Main design choices:
+- FP16
+- Test on Llama 3.2 1B
+- Single GPU (tested on RTX 5090 32GB)
 
-### Is this AI-coded or human-coded
-
-99% human-coded. It's a learning project for me, where learning >>> coding velocity. Some parts that are mundane can be AI-generated, like CMakeLists.txt or tokenization script
-
-Jędrzej Maczan, 2026
+Jędrzej Maczan, 2026, Apache License 2.0

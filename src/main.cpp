@@ -62,25 +62,30 @@ int readSafetensorsFile()
     std::string header;
     header.resize(header_size);
     file_handle.read(header.data(), header_size);
-    // std::cout << header << std::endl;
     std::cout << "Header read correctly\n";
     std::vector<TensorMetadata> tensors;
     json j = json::parse(header);
+    uint64_t max_offset = 0;
     for (auto &[key, value] : j.items())
     {
-        std::cout << key << ":" << value << "\n";
         if (key == "__metadata__")
         {
             continue;
+        }
+        uint64_t offset_end = value["data_offsets"].at(1).get<uint64_t>();
+        if (offset_end > max_offset)
+        {
+            max_offset = offset_end;
         }
         tensors.push_back(TensorMetadata{
             tensor_name : key,
             dtype : value["dtype"].get<std::string>(),
             shape : value["shape"].get<std::vector<int>>(),
             offset_begin : value["data_offsets"].at(0).get<uint64_t>(),
-            offset_end : value["data_offsets"].at(1).get<uint64_t>()
+            offset_end : offset_end
         });
     }
+    // TODO: perhaps hide it with pragma or something like that, it's only for debug
     for (auto &tensor : tensors)
     {
         std::cout << tensor.tensor_name << ", dtype: " << tensor.dtype << ", shape: (";
@@ -90,7 +95,13 @@ int readSafetensorsFile()
         }
         std::cout << "), offset: [" << tensor.offset_begin << ", " << tensor.offset_end << "]" << std::endl;
     }
-
+    void *gpu_tensors;
+    cudaMalloc(&gpu_tensors, max_offset);
+    std::vector<char> tensors_data;
+    tensors_data.resize(max_offset);
+    file_handle.read(tensors_data.data(), max_offset);
+    cudaMemcpy(gpu_tensors, tensors_data.data(), max_offset, cudaMemcpyHostToDevice);
+    std::cout << "Copied model tensors to GPU correctly!\n";
     file_handle.close();
     return 0;
 }

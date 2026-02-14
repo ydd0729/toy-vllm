@@ -17,8 +17,8 @@ External libraries:
 - tokenizer from HuggingFace Transformers
 
 Main design choices:
-- FP16
 - Test on Llama 3.2 1B
+- BF16 (because Llama 3.2 1B uses it)
 - Single GPU (tested on RTX 5090 32GB)
 
 ### use

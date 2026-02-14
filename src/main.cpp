@@ -7,6 +7,8 @@
 
 using json = nlohmann::json;
 
+constexpr int N_LAYERS = 16; // TODO: hardcoded for llama 3.2 1B, just like any other value for now
+
 int checkGPUStatus()
 {
     int device_count = 0;
@@ -46,6 +48,21 @@ struct TensorMetadata
     uint64_t offset_end;
 };
 
+struct Weights
+{
+    __nv_bfloat16* embed_tokens;
+    __nv_bfloat16* input_layernorms[N_LAYERS];
+    __nv_bfloat16* mlp_down_proj[N_LAYERS];
+    __nv_bfloat16* mlp_gate_proj[N_LAYERS];
+    __nv_bfloat16* mlp_up_proj[N_LAYERS];
+    __nv_bfloat16* post_attn_layernorms[N_LAYERS];
+    __nv_bfloat16* w_k[N_LAYERS];
+    __nv_bfloat16* w_o[N_LAYERS];
+    __nv_bfloat16* w_q[N_LAYERS];
+    __nv_bfloat16* w_v[N_LAYERS];
+    __nv_bfloat16* norm;
+};
+
 int main(int argc, char *argv[])
 {
     if (checkGPUStatus() != 0)
@@ -53,20 +70,20 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    std::ifstream file_handle("model.safetensors", std::ios_base::binary); // TODO: use args to provide the path or smth
-    if (!file_handle.is_open())
+    std::ifstream safetensors_file("model.safetensors", std::ios_base::binary); // TODO: use args to provide the path or smth
+    if (!safetensors_file.is_open())
     {
         std::cout << "Can't open model.safetensors file\n";
-        file_handle.close();
+        safetensors_file.close();
         return 1;
     }
     uint64_t header_size;
     // reinterpret_cast<char*> gives me an address of header_size
-    file_handle.read(reinterpret_cast<char *>(&header_size), 8);
+    safetensors_file.read(reinterpret_cast<char *>(&header_size), 8);
     std::cout << "Safetensors header size read correctly. Size of header: " << header_size << std::endl;
     std::string header;
     header.resize(header_size);
-    file_handle.read(header.data(), header_size);
+    safetensors_file.read(header.data(), header_size);
     std::cout << "Header read correctly\n";
     std::vector<TensorMetadata> tensors;
     json j = json::parse(header);
@@ -107,10 +124,10 @@ int main(int argc, char *argv[])
     cudaMalloc(&gpu_tensors, max_offset);
     std::vector<char> tensors_data;
     tensors_data.resize(max_offset);
-    file_handle.read(tensors_data.data(), max_offset);
+    safetensors_file.read(tensors_data.data(), max_offset);
     cudaMemcpy(gpu_tensors, tensors_data.data(), max_offset, cudaMemcpyHostToDevice);
     std::cout << "Copied model tensors to GPU correctly!\n";
-    file_handle.close();
+    safetensors_file.close();
 
 #ifdef DEBUG
     int test_size = 20;
@@ -130,6 +147,10 @@ int main(int argc, char *argv[])
         printf("%02x ", (unsigned char)tensors_data[i]);
     }
 #endif
+
+    Weights weights{};
+    weights.embed_tokens = (__nv_bfloat16*)((char*)gpu_tensors+tensors[0].offset_begin);
+
     std::vector<int> input_tokens;
     int token;
     while (std::cin >> token)
@@ -143,7 +164,6 @@ int main(int argc, char *argv[])
     }
 #endif
     
-
     std::cout << "\nClosing the program\n";
     return 0;
 }

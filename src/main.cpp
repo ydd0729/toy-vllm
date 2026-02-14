@@ -143,7 +143,6 @@ int main(int argc, char *argv[])
         weights.w_k[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.k_proj.weight"));
         weights.w_o[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.o_proj.weight"));
         weights.w_q[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.q_proj.weight"));
-        weights.w_q[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.q_proj.weight"));
         weights.w_v[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.v_proj.weight"));
     }
 

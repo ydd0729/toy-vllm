@@ -112,7 +112,6 @@ int main(int argc, char *argv[])
     safetensors_file.close();
 
 #ifdef DEBUG
-    int test_size = 20;
     std::vector<char> test_from_gpu;
     test_from_gpu.resize(20);
     cudaMemcpy(test_from_gpu.data(), gpu_tensors, 20, cudaMemcpyDeviceToHost);
@@ -160,6 +159,29 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    std::cout << "\nClosing the program\n";
+    void *gpu_input_tensors;
+    cudaMalloc(&gpu_input_tensors, input_tokens.size() * sizeof(int));
+    cudaMemcpy(gpu_input_tensors, input_tokens.data(), input_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
+    std::cout << "\nInput tokens copied to GPU\n";
+
+#ifdef DEBUG
+    std::vector<int> test_from_gpu_tokens;
+    test_from_gpu_tokens.resize(5);
+    cudaMemcpy(test_from_gpu_tokens.data(), gpu_input_tensors, 5 * sizeof(int), cudaMemcpyDeviceToHost);
+    std::cout << "\nCopied tokens from GPU:\n";
+    std::cout << "\n"
+              << test_from_gpu_tokens.data() << "\n";
+    for (auto &i : test_from_gpu_tokens)
+    {
+        std::cout << i << "\n";
+    }
+    std::cout << "\nOriginal CPU tokens data:\n";
+    for (int i = 0; i < 5; ++i)
+    {
+        std::cout << input_tokens[i] << "\n";
+    }
+#endif
+
+    std::cout << "\nOk bye!\n";
     return 0;
 }

@@ -1,0 +1,1 @@
+python python/tokenizer.py "The capital of France is" | ./test.sh

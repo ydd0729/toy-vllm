@@ -33,6 +33,7 @@ find_package(CUDAToolkit REQUIRED)
 
 add_executable(tiny-vllm
     src/main.cpp
+    src/kernels.cu
     # src/model.cpp
     # src/attention.cu
     # src/kernels.cu

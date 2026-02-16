@@ -4,6 +4,7 @@
 #include <cublas_v2.h>
 #define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include "json.hpp"
+#include "kernels.cuh"
 
 using json = nlohmann::json;
 
@@ -70,6 +71,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // READ SAFETENSORS
     std::ifstream safetensors_file("model.safetensors", std::ios_base::binary); // TODO: use args to provide the path or smth
     if (!safetensors_file.is_open())
     {
@@ -77,14 +79,20 @@ int main(int argc, char *argv[])
         safetensors_file.close();
         return 1;
     }
+
+    // READ SAFETENSORS HEADER SIZE
     uint64_t header_size;
     // reinterpret_cast<char*>(&header_size) gives me an address of header_size
     safetensors_file.read(reinterpret_cast<char *>(&header_size), 8);
     std::cout << "Safetensors header size read correctly. Size of header: " << header_size << std::endl;
+
+    // READ SAFETENSORS HEADER
     std::string header_raw;
     header_raw.resize(header_size);
     safetensors_file.read(header_raw.data(), header_size);
     std::cout << "Header read correctly\n";
+
+    // READ MODEL WEIGHTS: OFFSETS OF EVERY LAYER
     std::unordered_map<std::string, uint64_t> tensor_offsets;
     json header_json = json::parse(header_raw);
     uint64_t max_offset = 0;
@@ -128,6 +136,7 @@ int main(int argc, char *argv[])
         printf("%02x ", (unsigned char)tensors_data[i]);
     }
 #endif
+    // TODO: Probably can safely remove tensors_data here now?
 
     Weights weights{};
     weights.embed_tokens = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.embed_tokens.weight"));
@@ -159,18 +168,16 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    void *gpu_input_tensors;
-    cudaMalloc(&gpu_input_tensors, input_tokens.size() * sizeof(int));
-    cudaMemcpy(gpu_input_tensors, input_tokens.data(), input_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
+    int *gpu_input_tokens;
+    cudaMalloc(&gpu_input_tokens, input_tokens.size() * sizeof(int));
+    cudaMemcpy(gpu_input_tokens, input_tokens.data(), input_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
     std::cout << "\nInput tokens copied to GPU\n";
 
 #ifdef DEBUG
     std::vector<int> test_from_gpu_tokens;
     test_from_gpu_tokens.resize(5);
-    cudaMemcpy(test_from_gpu_tokens.data(), gpu_input_tensors, 5 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(test_from_gpu_tokens.data(), gpu_input_tokens, 5 * sizeof(int), cudaMemcpyDeviceToHost);
     std::cout << "\nCopied tokens from GPU:\n";
-    std::cout << "\n"
-              << test_from_gpu_tokens.data() << "\n";
     for (auto &i : test_from_gpu_tokens)
     {
         std::cout << i << "\n";
@@ -179,6 +186,28 @@ int main(int argc, char *argv[])
     for (int i = 0; i < 5; ++i)
     {
         std::cout << input_tokens[i] << "\n";
+    }
+#endif
+    __nv_bfloat16 *gpu_input_embeds;
+    cudaMalloc(&gpu_input_embeds, input_tokens.size() * sizeof(__nv_bfloat16) * 2048);
+    embeddingGather(gpu_input_tokens, gpu_input_embeds, weights.embed_tokens, input_tokens.size());
+    cudaDeviceSynchronize();
+
+#ifdef DEBUG
+    std::vector<__nv_bfloat16> test_gpu_input_embeds;
+    test_gpu_input_embeds.resize(2048);
+    cudaMemcpy(test_gpu_input_embeds.data(), gpu_input_embeds, sizeof(__nv_bfloat16) * 2048, cudaMemcpyDeviceToHost);
+    std::cout << "\nCopied embeds from GPU:\n";
+    // for (auto &i : test_gpu_input_embeds)
+    // {
+    //     std::cout << (float)i << "\n";
+    // }
+    std::cout << "\nOriginal CPU embeds data:\n";
+    for (int i = 0; i < 2048; ++i)
+    {
+        // tensor_offsets.at("model.layers." + std::to_string(i) + ".input_layernorm.weight")
+        // std::cout << input_tokens[i] << "\n";
+        // std::cout << (float)tensors_data[i] << " || " << (float)test_gpu_input_embeds[i] << "\n";
     }
 #endif
 

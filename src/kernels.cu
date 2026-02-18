@@ -23,7 +23,7 @@ void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __n
     auto error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
     {
-        std::cout << "CUDA last error: " cudaGetLastError() << std::endl;
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
     }
 #endif
 }
@@ -31,7 +31,6 @@ void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __n
 __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, nv_bfloat16 *norm_weights, int num_tokens)
 {
     __shared__ __nv_bfloat16 rms_vector[1024];
-    __shared__ __nv_bfloat16 rms;
     int workIndex = threadIdx.x + blockIdx.x * 2048;
     if (workIndex < num_tokens * 2048)
     {
@@ -80,7 +79,8 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, nv_bf
 	}
 	__syncthreads();
 	if (threadIdx.x == 0) {
-	    rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 1024];
+	    rms_vector[0] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 1024];
+	    rms_vector[0] = sqrt(rms_vector[0] / 2048 + 1.0e-5);
 	}
 	__syncthreads();
         // <(^-^)>
@@ -96,7 +96,7 @@ void rmsNorm(__nv_bfloat16 *input, __nv_bfloat16 *output, nv_bfloat16 *norm_weig
     auto error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
     {
-        std::cout << "CUDA last error: " cudaGetLastError() << std::endl;
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
     }
 #endif
 }

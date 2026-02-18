@@ -255,6 +255,11 @@ int main(int argc, char *argv[])
         return 1;
     }
 #endif
+    __nv_bfloat16 *rms_norms;
+    cudaMalloc(&rms_norms, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    rmsNorm(input_embeddings, rms_norms, weights.input_layernorm[0], input_tokens.size());
+    cudaDeviceSynchronize();
+
     std::cout << "\nOk bye!\n";
     return 0;
 }

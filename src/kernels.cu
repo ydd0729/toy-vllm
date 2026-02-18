@@ -7,20 +7,17 @@
 // num_input_tokens - N (just N, not N tokens)
 __global__ void embeddingGatherKernel(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __nv_bfloat16 *embed_tokens, int num_input_tokens)
 {
-    int workIndex = threadIdx.x + blockIdx.x * blockDim.x;
-    if (workIndex < num_input_tokens)
+    int workIndex = threadIdx.x + blockIdx.x * 2048;
+    if (workIndex < num_input_tokens * 2048)
     {
-        for (int i = 0; i < 2048; ++i)
-        {
-            gpu_input_embeds[workIndex * 2048 + i] = embed_tokens[gpu_input_tokens[workIndex] * 2048 + i];
-        }
+        gpu_input_embeds[workIndex] = embed_tokens[gpu_input_tokens[blockIdx.x] * 2048 + threadIdx.x];
+        gpu_input_embeds[workIndex + 1024] = embed_tokens[gpu_input_tokens[blockIdx.x] * 2048 + threadIdx.x + 1024];
     }
 }
 
 void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __nv_bfloat16 *embed_tokens, int num_input_tokens)
 {
-    // TODO: naively I run 1x1 grid (1 block) with 1xnum_input_tokens threads (num_input_tokens threads, so every thread gathers the full embedding)
-    // dumb but that's just to start ok??
-    embeddingGatherKernel<<<1, num_input_tokens>>>(gpu_input_tokens, gpu_input_embeds, embed_tokens, num_input_tokens);
+    // even though embedding is 2048, I can only dispatch 1024 because it's max threads per block on my gpu
+    embeddingGatherKernel<<<num_input_tokens, 1024>>>(gpu_input_tokens, gpu_input_embeds, embed_tokens, num_input_tokens);
     std::cout << cudaGetLastError() << std::endl;
 }

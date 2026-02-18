@@ -28,6 +28,7 @@ int checkGPUStatus()
     std::cout << "Compute capability: " << prop.major << "." << prop.minor << "\n";
     std::cout << "Global memory: " << prop.totalGlobalMem / (1024 * 1024) << " MB\n";
     std::cout << "SM count: " << prop.multiProcessorCount << "\n";
+    std::cout << "Max threads per block: " << prop.maxThreadsPerBlock << std::endl;
 
     cublasHandle_t handle;
     cublasStatus_t status = cublasCreate(&handle);

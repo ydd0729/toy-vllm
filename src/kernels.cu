@@ -28,9 +28,9 @@ void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __n
 #endif
 }
 
-__global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, nv_bfloat16 *norm_weights, int num_tokens)
+__global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_bfloat16 *norm_weights, int num_tokens)
 {
-    __shared__ __nv_bfloat16 rms_vector[1024];
+    __shared__ float rms_vector[1024];
     int workIndex = threadIdx.x + blockIdx.x * 2048;
     if (workIndex < num_tokens * 2048)
     {
@@ -79,17 +79,17 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, nv_bf
 	}
 	__syncthreads();
 	if (threadIdx.x == 0) {
-	    rms_vector[0] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 1024];
 	    rms_vector[0] = sqrt(rms_vector[0] / 2048 + 1.0e-5);
 	}
 	__syncthreads();
         // <(^-^)>
-        output[workIndex] = (input[workIndex] / rms_vector[0]) * norm_weights[threadIdx.x];
+        output[workIndex] = (__nv_bfloat16)((input[workIndex] / rms_vector[0]) * norm_weights[threadIdx.x]);
+        output[workIndex + 1024] = (__nv_bfloat16)((input[workIndex + 1024] / rms_vector[0]) * norm_weights[threadIdx.x]);
     }
 }
 
 // (N, 2048) -> (N, 2048)
-void rmsNorm(__nv_bfloat16 *input, __nv_bfloat16 *output, nv_bfloat16 *norm_weights, int num_tokens)
+void rmsNorm(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_bfloat16 *norm_weights, int num_tokens)
 {
     rmsNormKernel<<<num_tokens, 1024>>>(input, output, norm_weights, num_tokens);
 #ifdef DEBUG

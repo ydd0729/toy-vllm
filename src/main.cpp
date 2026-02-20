@@ -137,29 +137,56 @@ bool verifyRMSNormWeights(std::vector<char> &model_weights_cpu, std::unordered_m
     return is_correct_rms_weight;
 }
 
-bool verifyRMSNorm(std::vector<int> &input_tokens, nv_bfloat16 *input_embeddings, std::vector<char> &model_weights_cpu, std::unordered_map<std::string, uint64_t> &offsets)
+bool verifyRmsNorm(__nv_bfloat16 *gpu_input, __nv_bfloat16 *gpu_output,
+                   std::vector<char> &model_weights_cpu,
+                   std::unordered_map<std::string, uint64_t> &offsets,
+                   int num_tokens, int layer)
 {
-    std::vector<__nv_bfloat16> test_gpu_input_embeds;
-    test_gpu_input_embeds.resize(EMBEDDING_LENGTH * input_tokens.size());
-    cudaMemcpy(test_gpu_input_embeds.data(), input_embeddings, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH, cudaMemcpyDeviceToHost);
-    bool is_correct = true;
-    for (int token = 0; token < input_tokens.size(); ++token)
+    constexpr int DIM = 2048;
+    constexpr float EPSILON = 1e-5f;
+    constexpr float TOLERANCE = 1e-2f;
+
+    std::vector<__nv_bfloat16> cpu_input(num_tokens * DIM);
+    std::vector<__nv_bfloat16> cpu_output(num_tokens * DIM);
+    cudaMemcpy(cpu_input.data(), gpu_input, num_tokens * DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(cpu_output.data(), gpu_output, num_tokens * DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    std::string weight_key = "model.layers." + std::to_string(layer) + ".input_layernorm.weight";
+    __nv_bfloat16 *norm_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at(weight_key));
+
+    int mismatches = 0;
+    for (int t = 0; t < num_tokens; ++t)
     {
-        for (int i = 0; i < 2048; ++i)
+        float sum_sq = 0.0f;
+        for (int i = 0; i < DIM; ++i)
         {
-            __nv_bfloat16 *all_embeds_cpu = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.embed_tokens.weight"));
-            if ((float)test_gpu_input_embeds[token * 2048 + i] != (float)all_embeds_cpu[input_tokens[token] * 2048 + i])
+            float val = (float)cpu_input[t * DIM + i];
+            sum_sq += val * val;
+        }
+        float rms = sqrtf(sum_sq / DIM + EPSILON);
+
+        for (int i = 0; i < DIM; ++i)
+        {
+            float input_val = (float)cpu_input[t * DIM + i];
+            float weight_val = (float)norm_weights[i];
+            float expected = (input_val / rms) * weight_val;
+            float actual = (float)cpu_output[t * DIM + i];
+
+            float rel_err = (expected == 0.0f) ? fabs(actual) : fabs(actual - expected) / fabs(expected);
+            if (rel_err > TOLERANCE)
             {
-                if (is_correct)
+                if (mismatches < 10)
                 {
-                    std::cout << "Incorrect embeddings were retrieved" << std::endl;
+                    std::cout << "RMSNorm MISMATCH token=" << t << " elem=" << i
+                              << " expected=" << expected << " got=" << actual
+                              << " rel_err=" << rel_err << "\n";
                 }
-                std::cout << "GPU:" << (float)test_gpu_input_embeds[token * 2048 + i] << " | CPU: " << (float)all_embeds_cpu[input_tokens[token] * 2048 + i] << "\n";
-                is_correct = false;
+                mismatches++;
             }
         }
     }
-    return is_correct;
+
+    return mismatches == 0;
 }
 
 struct Weights
@@ -310,8 +337,11 @@ int main(int argc, char *argv[])
     rmsNorm(input_embeddings, rms_norms, weights.input_layernorm[0], input_tokens.size());
     cudaDeviceSynchronize();
 #ifdef DEBUG
-    verifyRMSNormWeights(model_weights_cpu, offsets);
-    verifyRMSNorm(rms_norms);
+    if (!verifyRMSNormWeights(model_weights_cpu, offsets) || !verifyRmsNorm(input_embeddings, rms_norms, model_weights_cpu, offsets, input_tokens.size(), 0))
+    {
+        return 1;
+    }
+
 #endif
 
     std::cout << "\nOk bye!\n";

@@ -29,17 +29,6 @@ int checkGPUStatus()
     std::cout << "Global memory: " << prop.totalGlobalMem / (1024 * 1024) << " MB\n";
     std::cout << "SM count: " << prop.multiProcessorCount << "\n";
     std::cout << "Max threads per block: " << prop.maxThreadsPerBlock << std::endl;
-
-    cublasHandle_t handle;
-    cublasStatus_t status = cublasCreate(&handle);
-    if (status != CUBLAS_STATUS_SUCCESS)
-    {
-        std::cerr << "cuBLAS init failed\n";
-        return 1;
-    }
-    std::cout << "cuBLAS initialized OK\n";
-    cublasDestroy(handle);
-
     return 0;
 }
 
@@ -173,7 +162,7 @@ bool verifyRmsNorm(__nv_bfloat16 *gpu_input, __nv_bfloat16 *gpu_output,
             float actual = (float)cpu_output[t * DIM + i];
 
             float rel_err = (expected == 0.0f) ? fabs(actual) : fabs(actual - expected) / fabs(expected);
-            if (rel_err > TOLERANCE)
+            if (rel_err > TOLERANCE || isnanf(actual) || isnanf(expected))
             {
                 if (mismatches < 10)
                 {
@@ -339,11 +328,50 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
     if (!verifyRMSNormWeights(model_weights_cpu, offsets) || !verifyRmsNorm(input_embeddings, rms_norms, model_weights_cpu, offsets, input_tokens.size(), 0))
     {
+        std::cout << "RMS norm verification failed" << std::endl;
+        return 1;
+    }
+#endif
+
+    cublasHandle_t cublas_handle;
+    cublasStatus_t status = cublasCreate(&cublas_handle);
+    if (status != CUBLAS_STATUS_SUCCESS)
+    {
+        std::cerr << "cuBLAS init failed, status: " << status << "\n";
         return 1;
     }
 
+#ifdef DEBUG
+    std::cout << "cuBLAS initialized OK\n";
 #endif
 
+    __nv_bfloat16 *q;
+    cudaMalloc(&q, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    auto gemm_status = cublasGemmEx(cublas_handle,
+                                    CUBLAS_OP_T,
+                                    CUBLAS_OP_N,
+                                    EMBEDDING_LENGTH,
+                                    input_tokens.size(),
+                                    EMBEDDING_LENGTH,
+                                    &alpha,
+                                    weights.w_q[0],
+                                    CUDA_R_16BF,
+                                    EMBEDDING_LENGTH,
+                                    rms_norms,
+                                    CUDA_R_16BF,
+                                    EMBEDDING_LENGTH,
+                                    &beta,
+                                    q,
+                                    CUDA_R_16BF,
+                                    EMBEDDING_LENGTH,
+                                    CUBLAS_COMPUTE_32F,
+                                    CUBLAS_GEMM_DEFAULT);
+    cudaDeviceSynchronize();
+    std::cout << "Cublas first gemm status: " << gemm_status << std::endl;
     std::cout << "\nOk bye!\n";
+    cublasDestroy(cublas_handle);
+    cudaDeviceSynchronize();
     return 0;
 }

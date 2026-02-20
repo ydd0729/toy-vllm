@@ -37,57 +37,14 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_
         rms_vector[threadIdx.x] = (float)input[workIndex] * (float)input[workIndex] + (float)input[workIndex + 1024] * (float)input[workIndex + 1024];
         __syncthreads();
         // tree reduction
-        if (threadIdx.x % 2 == 0)
+        for (int i = 1; i < 1024; i = i * 2)
         {
-            // every second has its predecessor
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 1];
+            if (threadIdx.x % (i * 2) == 0)
+            {
+                rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + i];
+            }
+            __syncthreads();
         }
-        __syncthreads();
-        if (threadIdx.x % 4 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 2];
-        }
-        __syncthreads();
-        if (threadIdx.x % 8 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 4];
-        }
-        __syncthreads();
-        if (threadIdx.x % 16 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 8];
-        }
-        __syncthreads();
-        if (threadIdx.x % 32 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 16];
-        }
-        __syncthreads();
-        if (threadIdx.x % 64 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 32];
-        }
-        __syncthreads();
-        if (threadIdx.x % 128 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 64];
-        }
-        __syncthreads();
-        if (threadIdx.x % 256 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 128];
-        }
-        __syncthreads();
-        if (threadIdx.x % 512 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 256];
-        }
-        __syncthreads();
-        if (threadIdx.x % 1024 == 0)
-        {
-            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + 512];
-        }
-        __syncthreads();
         if (threadIdx.x == 0)
         {
             rms_vector[0] = sqrt(rms_vector[0] / 2048.0 + 1.0e-5);

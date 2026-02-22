@@ -363,6 +363,53 @@ bool verifyAttnScores(__nv_bfloat16 *gpu_q, __nv_bfloat16 *gpu_k, __nv_bfloat16 
     return mismatches == 0;
 }
 
+bool verifyCausalMask(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &scores_before_mask,
+                      int num_tokens)
+{
+    std::vector<__nv_bfloat16> scores_cpu(num_tokens * num_tokens * NUM_Q_HEADS);
+    cudaMemcpy(scores_cpu.data(), gpu_scores, num_tokens * num_tokens * NUM_Q_HEADS * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    int mismatches = 0;
+    for (int h = 0; h < NUM_Q_HEADS; ++h)
+    {
+        for (int row = 0; row < num_tokens; ++row)
+        {
+            for (int col = 0; col < num_tokens; ++col)
+            {
+                int idx = h * num_tokens * num_tokens + row * num_tokens + col;
+                float actual = (float)scores_cpu[idx];
+                if (col > row)
+                {
+                    if (!isinf(actual) || actual > 0)
+                    {
+                        if (mismatches < 10)
+                            std::cout << "CAUSAL MASK MISMATCH head=" << h << " row=" << row << " col=" << col
+                                      << " expected=-inf got=" << actual << "\n";
+                        mismatches++;
+                    }
+                }
+                else
+                {
+                    float before = (float)scores_before_mask[idx];
+                    if (actual != before)
+                    {
+                        if (mismatches < 10)
+                            std::cout << "CAUSAL MASK MISMATCH head=" << h << " row=" << row << " col=" << col
+                                      << " value changed from " << before << " to " << actual << "\n";
+                        mismatches++;
+                    }
+                }
+            }
+        }
+    }
+
+    if (mismatches == 0)
+        std::cout << "Causal mask verification PASSED\n";
+    else
+        std::cout << "Causal mask verification FAILED: " << mismatches << " mismatches\n";
+    return mismatches == 0;
+}
+
 struct Weights
 {
     __nv_bfloat16 *embed_tokens;
@@ -499,8 +546,8 @@ int main(int argc, char *argv[])
     __nv_bfloat16 *input_embeddings;
     cudaMalloc(&input_embeddings, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, input_tokens.size());
-    cudaDeviceSynchronize();
 #ifdef DEBUG
+    cudaDeviceSynchronize();
     if (!verifyEmbeddingGather(input_tokens, input_embeddings, model_weights_cpu, offsets))
     {
         return 1;
@@ -509,8 +556,8 @@ int main(int argc, char *argv[])
     __nv_bfloat16 *rms_norms;
     cudaMalloc(&rms_norms, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     rmsNorm(input_embeddings, rms_norms, weights.input_layernorm[0], input_tokens.size());
-    cudaDeviceSynchronize();
 #ifdef DEBUG
+    cudaDeviceSynchronize();
     if (!verifyRMSNormWeights(model_weights_cpu, offsets) || !verifyRmsNorm(input_embeddings, rms_norms, model_weights_cpu, offsets, input_tokens.size(), 0))
     {
         std::cout << "RMS norm verification failed" << std::endl;
@@ -562,8 +609,8 @@ int main(int argc, char *argv[])
                                                 EMBEDDING_LENGTH,
                                                 CUBLAS_COMPUTE_32F,
                                                 CUBLAS_GEMM_DEFAULT);
-    cudaDeviceSynchronize();
 #ifdef DEBUG
+    cudaDeviceSynchronize();
     verifyQProjection(q_proj_status, input_tokens, q_proj, model_weights_cpu, offsets, rms_norms);
 #endif
 
@@ -622,18 +669,20 @@ int main(int argc, char *argv[])
                                                 CUBLAS_GEMM_DEFAULT);
 
     // RoPE now
-
+#ifdef DEBUG
     std::vector<__nv_bfloat16> q_before_rope(input_tokens.size() * EMBEDDING_LENGTH);
     std::vector<__nv_bfloat16> k_before_rope(input_tokens.size() * KV_DIM);
+
     cudaMemcpy(q_before_rope.data(), q_proj, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
     cudaMemcpy(k_before_rope.data(), k_proj, input_tokens.size() * KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-
+#endif
     rope(q_proj, input_tokens.size(), EMBEDDING_LENGTH);
     rope(k_proj, input_tokens.size(), KV_DIM);
+#ifdef DEBUG
     cudaDeviceSynchronize();
 
     verifyRope(q_proj, k_proj, q_before_rope, k_before_rope, input_tokens.size());
-
+#endif
     // attention scores
     // per head, 64 elements each
     // so total 32 heads
@@ -675,8 +724,10 @@ int main(int argc, char *argv[])
                                                         CUBLAS_COMPUTE_32F,
                                                         CUBLAS_GEMM_DEFAULT);
     }
+#ifdef DEBUG
     cudaDeviceSynchronize();
     verifyAttnScores(q_proj, k_proj, attn_scores, input_tokens.size());
+#endif
     causalMask(attn_scores, input_tokens.size());
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);

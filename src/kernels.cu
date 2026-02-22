@@ -117,10 +117,10 @@ __global__ void causalMaskKernel(__nv_bfloat16 *input, int num_tokens)
 
     int head_idx = blockIdx.x / num_tokens; // because blockId.x is in range [0, num_tokens * NUM_Q_HEADS]
     int column = threadIdx.x;
-    int row = blockIdx.x / NUM_Q_HEADS;
+    int row = blockIdx.x % num_tokens;
     if (column > row)
     {
-        input[blockIdx.x + threadIdx.x] = -HUGE_VALF;
+        input[blockIdx.x * num_tokens + threadIdx.x] = -HUGE_VALF;
     }
 }
 

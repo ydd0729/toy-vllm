@@ -75,6 +75,7 @@ __global__ void ropeKernel(__nv_bfloat16 *input, int num_tokens, int proj_dim)
 {
     if (2 * threadIdx.x + 1 + blockIdx.x * proj_dim < num_tokens * proj_dim)
     {
+        // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel invocations
         int double_i = 2 * (threadIdx.x % 32);
         float theta = 1.0 / (pow(500000.0, ((float)double_i / HEAD_DIM)));
         float angle = blockIdx.x * theta;

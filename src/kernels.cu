@@ -2,6 +2,7 @@
 #include <iostream>
 
 constexpr int HEAD_DIM = 64;
+constexpr int NUM_Q_HEADS = 32;
 
 // gpu_input_tokens - N tokens
 // gpu_input_embeds - N * sizeof(__nv_bfloat16) * 2048
@@ -98,6 +99,40 @@ void rope(__nv_bfloat16 *input, int num_tokens, int proj_dim)
     }
 
     ropeKernel<<<num_tokens, num_threads>>>(input, num_tokens, proj_dim);
+#ifdef DEBUG
+    auto error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+
+__global__ void causalMaskKernel(__nv_bfloat16 *input, int num_tokens)
+{
+    if (threadIdx.x + blockIdx.x * blockDim.x >= num_tokens * num_tokens * NUM_Q_HEADS)
+    {
+        return;
+    }
+
+    int head_idx = blockIdx.x / num_tokens; // because blockId.x is in range [0, num_tokens * NUM_Q_HEADS]
+    int column = threadIdx.x;
+    int row = blockIdx.x / NUM_Q_HEADS;
+    if (column > row)
+    {
+        input[blockIdx.x + threadIdx.x] = -HUGE_VALF;
+    }
+}
+
+void causalMask(__nv_bfloat16 *input, int num_tokens)
+{
+    if (num_tokens > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, Causal mask kernel not launched";
+        return;
+    }
+
+    causalMaskKernel<<<num_tokens * NUM_Q_HEADS, num_tokens>>>(input, num_tokens);
 #ifdef DEBUG
     auto error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)

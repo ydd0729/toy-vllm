@@ -677,6 +677,7 @@ int main(int argc, char *argv[])
     }
     cudaDeviceSynchronize();
     verifyAttnScores(q_proj, k_proj, attn_scores, input_tokens.size());
+    causalMask(attn_scores, input_tokens.size());
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();

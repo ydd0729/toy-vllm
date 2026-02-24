@@ -314,8 +314,7 @@ bool verifyRope(__nv_bfloat16 *gpu_q, __nv_bfloat16 *gpu_k,
     return mismatches == 0;
 }
 
-bool verifyAttnScores(__nv_bfloat16 *gpu_q, __nv_bfloat16 *gpu_k, __nv_bfloat16 *gpu_scores,
-                      int num_tokens)
+bool verifyAttnScores(__nv_bfloat16 *gpu_q, __nv_bfloat16 *gpu_k, __nv_bfloat16 *gpu_scores, int num_tokens)
 {
     constexpr float TOLERANCE = 1e-1f;
     constexpr float SCALE = 1.0f / 8.0f;
@@ -365,8 +364,7 @@ bool verifyAttnScores(__nv_bfloat16 *gpu_q, __nv_bfloat16 *gpu_k, __nv_bfloat16 
     return mismatches == 0;
 }
 
-bool verifyCausalMask(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &scores_before_mask,
-                      int num_tokens)
+bool verifyCausalMask(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &scores_before_mask, int num_tokens)
 {
     std::vector<__nv_bfloat16> scores_cpu(num_tokens * num_tokens * NUM_Q_HEADS);
     cudaMemcpy(scores_cpu.data(), gpu_scores, num_tokens * num_tokens * NUM_Q_HEADS * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
@@ -412,8 +410,7 @@ bool verifyCausalMask(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &sco
     return mismatches == 0;
 }
 
-bool verifySoftmax(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &scores_before_softmax,
-                   int num_tokens)
+bool verifySoftmax(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &scores_before_softmax, int num_tokens)
 {
     constexpr float TOLERANCE = 1e-2f;
 
@@ -480,8 +477,7 @@ bool verifySoftmax(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &scores
     return mismatches == 0;
 }
 
-bool verifyScoreTimesV(__nv_bfloat16 *gpu_scores, __nv_bfloat16 *gpu_v, __nv_bfloat16 *gpu_output,
-                       int num_tokens)
+bool verifyScoreTimesV(__nv_bfloat16 *gpu_scores, __nv_bfloat16 *gpu_v, __nv_bfloat16 *gpu_output, int num_tokens)
 {
     constexpr float TOLERANCE = 1e-1f;
 
@@ -526,6 +522,79 @@ bool verifyScoreTimesV(__nv_bfloat16 *gpu_scores, __nv_bfloat16 *gpu_v, __nv_bfl
         std::cout << "Score*V verification PASSED\n";
     else
         std::cout << "Score*V verification FAILED: " << mismatches << " mismatches\n";
+    return mismatches == 0;
+}
+
+bool verifyOProjection(cublasStatus_t gemm_status, std::vector<int> &input_tokens,
+                       __nv_bfloat16 *gpu_o_output, __nv_bfloat16 *gpu_attn_scores_v,
+                       std::vector<char> &model_weights_cpu,
+                       std::unordered_map<std::string, uint64_t> &offsets)
+{
+    std::cout << "O projection gemm status: " << gemm_status << std::endl;
+    std::vector<__nv_bfloat16> o_cpu(input_tokens.size() * EMBEDDING_LENGTH);
+    cudaMemcpy(o_cpu.data(), gpu_o_output, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    __nv_bfloat16 *o_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.layers.0.self_attn.o_proj.weight"));
+    std::vector<__nv_bfloat16> input_cpu(input_tokens.size() * EMBEDDING_LENGTH);
+    cudaMemcpy(input_cpu.data(), gpu_attn_scores_v, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    bool is_correct = true;
+    for (int token_idx = 0; token_idx < input_tokens.size(); ++token_idx)
+    {
+        for (int j = 0; j < EMBEDDING_LENGTH; ++j)
+        {
+            float sum = 0.0f;
+            for (int k = 0; k < EMBEDDING_LENGTH; ++k)
+            {
+                float input_value = (float)input_cpu[token_idx * EMBEDDING_LENGTH + k];
+                float weight_value = (float)o_weights[j * EMBEDDING_LENGTH + k];
+                sum += input_value * weight_value;
+            }
+            float actual = (float)o_cpu[token_idx * EMBEDDING_LENGTH + j];
+            float rel_err = (sum == 0.0f) ? fabsf(actual) : fabsf(actual - sum) / fabsf(sum);
+            if (rel_err > 1e-1)
+            {
+                std::cout << "O MISMATCH token=" << token_idx << " dim=" << j
+                          << " expected=" << sum << " got=" << actual
+                          << " rel_err=" << rel_err << "\n";
+                is_correct = false;
+            }
+        }
+    }
+    if (is_correct)
+        std::cout << "O projection check done, all correct!" << std::endl;
+    else
+        std::cout << "O projection check failed!" << std::endl;
+    return is_correct;
+}
+
+bool verifyResidualAdd(__nv_bfloat16 *gpu_output, __nv_bfloat16 *gpu_a, __nv_bfloat16 *gpu_b, int num_tokens)
+{
+    std::vector<__nv_bfloat16> output_cpu(num_tokens * EMBEDDING_LENGTH);
+    std::vector<__nv_bfloat16> a_cpu(num_tokens * EMBEDDING_LENGTH);
+    std::vector<__nv_bfloat16> b_cpu(num_tokens * EMBEDDING_LENGTH);
+    cudaMemcpy(output_cpu.data(), gpu_output, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(a_cpu.data(), gpu_a, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(b_cpu.data(), gpu_b, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    int mismatches = 0;
+    for (int i = 0; i < num_tokens * EMBEDDING_LENGTH; ++i)
+    {
+        float expected = (float)a_cpu[i] + (float)b_cpu[i];
+        float actual = (float)output_cpu[i];
+        float rel_err = (expected == 0.0f) ? fabsf(actual) : fabsf(actual - expected) / fabsf(expected);
+        if (rel_err > 1e-3 || isnanf(actual))
+        {
+            if (mismatches < 10)
+                std::cout << "RESIDUAL MISMATCH idx=" << i
+                          << " expected=" << expected << " got=" << actual << "\n";
+            mismatches++;
+        }
+    }
+    if (mismatches == 0)
+        std::cout << "Residual add verification PASSED\n";
+    else
+        std::cout << "Residual add verification FAILED: " << mismatches << " mismatches\n";
     return mismatches == 0;
 }
 
@@ -912,6 +981,36 @@ int main(int argc, char *argv[])
     cudaDeviceSynchronize();
     verifyScoreTimesV(attn_scores, v_proj, attn_scores_v, input_tokens.size());
 #endif
+
+    // output projection
+    // attn_scores_v * w_o^T
+    // (num_tok, 2048) * (2048, 2048) -> (num_tok, 2048)
+    // same as Q projection, so copy paste
+    __nv_bfloat16 *o_proj;
+    cudaMalloc(&o_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    float o_proj_alpha = 1.0f;
+    float o_proj_beta = 0.0f;
+    cublasStatus_t o_proj_status = cublasGemmEx(cublas_handle,
+                                                CUBLAS_OP_T,
+                                                CUBLAS_OP_N,
+                                                EMBEDDING_LENGTH,
+                                                input_tokens.size(),
+                                                EMBEDDING_LENGTH,
+                                                &o_proj_alpha,
+                                                weights.w_o[0],
+                                                CUDA_R_16BF,
+                                                EMBEDDING_LENGTH,
+                                                attn_scores_v,
+                                                CUDA_R_16BF,
+                                                EMBEDDING_LENGTH,
+                                                &o_proj_beta,
+                                                o_proj,
+                                                CUDA_R_16BF,
+                                                EMBEDDING_LENGTH,
+                                                CUBLAS_COMPUTE_32F,
+                                                CUBLAS_GEMM_DEFAULT);
+    cudaDeviceSynchronize();
+    verifyOProjection(o_proj_status, input_tokens, o_proj, attn_scores_v, model_weights_cpu, offsets);
 
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);

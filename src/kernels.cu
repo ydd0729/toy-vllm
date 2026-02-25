@@ -204,7 +204,7 @@ void softmax(__nv_bfloat16 *input, int num_tokens)
 #endif
 }
 
-__global__ void residualKernel(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_tokens)
+__global__ void residualKernel(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds)
 {
     int workIndex = threadIdx.x + blockIdx.x * 2048;
     input[workIndex] = input[workIndex] + input_embeds[workIndex];
@@ -214,7 +214,7 @@ __global__ void residualKernel(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds
 // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
 void residualAdd(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_tokens)
 {
-    residualKernel<<<num_tokens, 1024>>>(input, input_embeds, num_tokens);
+    residualKernel<<<num_tokens, 1024>>>(input, input_embeds);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
@@ -222,4 +222,19 @@ void residualAdd(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_toke
         std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
     }
 #endif
+}
+
+__global__ void siluKernel(__nv_bfloat16 *a, __nv_bfloat16 *b)
+{
+    int workIndex = threadIdx.x + blockIdx.x * 8192;
+    for (int i = 0; i < 8192; i += 1024)
+    {
+        a[workIndex + i] = (__nv_bfloat16)((float)a[workIndex + i] * (1 / (1 + expf(-(float)a[workIndex + i]))) * (float)b[workIndex + i]);
+    }
+}
+
+// in-place, overwriting a
+void silu(__nv_bfloat16 *a, __nv_bfloat16 *b, int num_tokens)
+{
+    siluKernel<<<num_tokens, 1024>>>(a, b);
 }

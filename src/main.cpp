@@ -11,6 +11,7 @@ using json = nlohmann::json;
 
 constexpr int N_LAYERS = 16; // TODO: hardcoded for llama 3.2 1B, just like any other value for now
 constexpr int EMBEDDING_LENGTH = 2048;
+constexpr int HIDDEN_DIM = 8192;
 constexpr int KV_DIM = 512;
 constexpr int HEAD_DIM = 64;
 constexpr int NUM_Q_HEADS = 32;
@@ -534,7 +535,7 @@ bool verifyOProjection(cublasStatus_t gemm_status, std::vector<int> &input_token
     std::vector<__nv_bfloat16> o_cpu(input_tokens.size() * EMBEDDING_LENGTH);
     cudaMemcpy(o_cpu.data(), gpu_o_output, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
 
-    __nv_bfloat16 *o_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.layers.0.self_attn.o_proj.weight"));
+    __nv_bfloat16 *o_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.layers.0.self_attn.hidden_state.weight"));
     std::vector<__nv_bfloat16> input_cpu(input_tokens.size() * EMBEDDING_LENGTH);
     cudaMemcpy(input_cpu.data(), gpu_attn_scores_v, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
 
@@ -572,9 +573,9 @@ struct Weights
 {
     __nv_bfloat16 *embed_tokens;
     __nv_bfloat16 *input_layernorm[N_LAYERS];
-    __nv_bfloat16 *mlp_down_proj[N_LAYERS];
     __nv_bfloat16 *mlp_gate_proj[N_LAYERS];
     __nv_bfloat16 *mlp_up_proj[N_LAYERS];
+    __nv_bfloat16 *mlp_down_proj[N_LAYERS];
     __nv_bfloat16 *post_attn_layernorms[N_LAYERS];
     __nv_bfloat16 *w_k[N_LAYERS];
     __nv_bfloat16 *w_o[N_LAYERS];
@@ -659,7 +660,7 @@ int main(int argc, char *argv[])
         weights.mlp_up_proj[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".mlp.up_proj.weight"));
         weights.post_attn_layernorms[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".post_attention_layernorm.weight"));
         weights.w_k[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".self_attn.k_proj.weight"));
-        weights.w_o[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".self_attn.o_proj.weight"));
+        weights.w_o[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".self_attn.hidden_state.weight"));
         weights.w_q[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".self_attn.q_proj.weight"));
         weights.w_v[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".self_attn.v_proj.weight"));
     }
@@ -952,12 +953,12 @@ int main(int argc, char *argv[])
     verifyScoreTimesV(attn_scores, v_proj, attn_scores_v, input_tokens.size());
 #endif
 
-    // output projection
+    // output projection - "hidden state", it will be an input for MLP blocks
     // attn_scores_v * w_o^T
     // (num_tok, 2048) * (2048, 2048) -> (num_tok, 2048)
     // same as Q projection, so copy paste
-    __nv_bfloat16 *o_proj;
-    cudaMalloc(&o_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    __nv_bfloat16 *hidden_state;
+    cudaMalloc(&hidden_state, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     float o_proj_alpha = 1.0f;
     float o_proj_beta = 0.0f;
     cublasStatus_t o_proj_status = cublasGemmEx(cublas_handle,
@@ -974,17 +975,87 @@ int main(int argc, char *argv[])
                                                 CUDA_R_16BF,
                                                 EMBEDDING_LENGTH,
                                                 &o_proj_beta,
-                                                o_proj,
+                                                hidden_state,
                                                 CUDA_R_16BF,
                                                 EMBEDDING_LENGTH,
                                                 CUBLAS_COMPUTE_32F,
                                                 CUBLAS_GEMM_DEFAULT);
 #ifdef DEBUG
     cudaDeviceSynchronize();
-    verifyOProjection(o_proj_status, input_tokens, o_proj, attn_scores_v, model_weights_cpu, offsets);
+    verifyOProjection(o_proj_status, input_tokens, hidden_state, attn_scores_v, model_weights_cpu, offsets);
 #endif
     // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-    residualAdd(o_proj, input_embeddings, input_tokens.size());
+    residualAdd(hidden_state, input_embeddings, input_tokens.size());
+
+    // post attention RMS Norm
+    rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[0], input_tokens.size());
+
+    // SwiGLU time - just MLP + SiLU
+    // gate = hidden_state (rms-normed) * mlp_gate_proj ^ T
+    // HIDDEN_DIM = 8192
+    // (num_tok, 2048) * (2048, 8192) -> (num_tok, 8192)
+    // my data is row major so transpose trick
+    // gate ^T = (mlp_gate_proj ^ T)^T * hidden_state^T
+    // gate ^T = mlp_gate_proj * hidden_state^T
+    // (num_tok, 8192)^T = (8192, 2048) * (2048, num_tok)
+    // but data is perceived as column major so I need to transpose mlp_gate_proj
+    // to make it work
+    // m 8192 n num_tok k 2048 lda 2048 ldb 2048 ldc 8192
+    __nv_bfloat16 *gate;
+    cudaMalloc(&gate, input_tokens.size() * sizeof(__nv_bfloat16) * HIDDEN_DIM);
+    float gate_alpha = 1.0f;
+    float gate_beta = 0.0f;
+    cublasStatus_t gate_status = cublasGemmEx(cublas_handle,
+                                              CUBLAS_OP_T,
+                                              CUBLAS_OP_N,
+                                              HIDDEN_DIM,
+                                              input_tokens.size(),
+                                              EMBEDDING_LENGTH,
+                                              &gate_alpha,
+                                              weights.mlp_gate_proj[0],
+                                              CUDA_R_16BF,
+                                              EMBEDDING_LENGTH,
+                                              rms_norms,
+                                              CUDA_R_16BF,
+                                              EMBEDDING_LENGTH,
+                                              &gate_beta,
+                                              gate,
+                                              CUDA_R_16BF,
+                                              HIDDEN_DIM,
+                                              CUBLAS_COMPUTE_32F,
+                                              CUBLAS_GEMM_DEFAULT);
+
+    // up, the same dims as gate
+    __nv_bfloat16 *up;
+    cudaMalloc(&up, input_tokens.size() * sizeof(__nv_bfloat16) * HIDDEN_DIM);
+    float up_alpha = 1.0f;
+    float up_beta = 0.0f;
+    cublasStatus_t up_status = cublasGemmEx(cublas_handle,
+                                            CUBLAS_OP_T,
+                                            CUBLAS_OP_N,
+                                            HIDDEN_DIM,
+                                            input_tokens.size(),
+                                            EMBEDDING_LENGTH,
+                                            &up_alpha,
+                                            weights.mlp_up_proj[0],
+                                            CUDA_R_16BF,
+                                            EMBEDDING_LENGTH,
+                                            rms_norms,
+                                            CUDA_R_16BF,
+                                            EMBEDDING_LENGTH,
+                                            &up_beta,
+                                            up,
+                                            CUDA_R_16BF,
+                                            HIDDEN_DIM,
+                                            CUBLAS_COMPUTE_32F,
+                                            CUBLAS_GEMM_DEFAULT);
+
+    // SiLU
+    // after_silu = SiLU(gate) * up (element-wise multication)
+    // after_silu = gate * (1 / (1 + e^(-gate))) * up
+    // gate is dim (num_tok, 8192), up too
+    silu(gate, up, input_tokens.size());
+
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();

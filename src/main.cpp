@@ -1054,7 +1054,43 @@ int main(int argc, char *argv[])
     // after_silu = SiLU(gate) * up (element-wise multication)
     // after_silu = gate * (1 / (1 + e^(-gate))) * up
     // gate is dim (num_tok, 8192), up too
-    silu(gate, up, input_tokens.size());
+    silu(gate, up, input_tokens.size()); // gate = after_silu now
+
+    // down projection
+    // output = post-silu * down_proj^T
+    // dims: (num_tok, 8192) * (2048, 8192) ^ T = (num_tok, 8192) * (8192, 2048) = (num_tok, 2048)
+    // output^T = (down_proj^T)^T * post-silu^T
+    // output^T = down_proj * post-silu^T
+    // cublas sees them already as transposed so only down_proj I need to transpose
+    // dims = (2048, 8192) * (8192, num_tok) = (2048, num_tok)
+    // m: 2048 n: num_tok, k: 8192
+    // lda: 8192, ldb: 8192, ldc: 2048
+    __nv_bfloat16 *down;
+    cudaMalloc(&down, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    float down_alpha = 1.0f;
+    float down_beta = 0.0f;
+    cublasStatus_t down_status = cublasGemmEx(cublas_handle,
+                                              CUBLAS_OP_T,
+                                              CUBLAS_OP_N,
+                                              EMBEDDING_LENGTH,
+                                              input_tokens.size(),
+                                              HIDDEN_DIM,
+                                              &down_alpha,
+                                              weights.mlp_down_proj[0],
+                                              CUDA_R_16BF,
+                                              HIDDEN_DIM,
+                                              gate,
+                                              CUDA_R_16BF,
+                                              HIDDEN_DIM,
+                                              &down_beta,
+                                              down,
+                                              CUDA_R_16BF,
+                                              EMBEDDING_LENGTH,
+                                              CUBLAS_COMPUTE_32F,
+                                              CUBLAS_GEMM_DEFAULT);
+
+    // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
+    residualAdd(hidden_state, down, input_tokens.size());
 
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);

@@ -19,6 +19,7 @@ constexpr int NUM_K_HEADS = 8;
 constexpr int NUM_V_HEADS = 8;
 constexpr int GQA_Q_TO_K_RATIO = 4;
 constexpr int GQA_ATTN_SCORES_TO_V_RATIO = 4;
+constexpr int VOCAB_SIZE = 128256;
 
 int checkGPUStatus()
 {
@@ -1112,6 +1113,44 @@ int main(int argc, char *argv[])
         // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
         residualAdd(hidden_state, down, input_tokens.size());
     }
+    rmsNorm(hidden_state, rms_norms, weights.norm, input_tokens.size());
+
+    // logits = rms_norms * weights.embed_tokens^T
+    // dim rms_norms: (num_tok, 2048), dim embed_tokens: (128256, 2048)
+    // logits dim = (num_tok, 2048) * (2048, 128256) = (num_tok, 128256) => m = num_tok, n = 128256, k = 2048
+    // I leave this comment above because it shows a bug in my thinking
+    // because I use the cublas trick, logits are transposed so m and n should be swapped
+    // so m 128256, n num_tok
+    // data is row major so we treat it as transposed and use the trick
+    // logits^T = ((weights.embed_tokens^T)^T * rms_norms^T
+    // logits^T = weights.embed_tokens * rms_norms^T
+    // so we need to transpose embed_tokens, because rms_norms already
+    // appears to cublas as transposed
+    // lda = 2048, ldb = 2048, ldc = 128256
+    __nv_bfloat16 *embed_proj;
+    cudaMalloc(&embed_proj, sizeof(__nv_bfloat16) * input_tokens.size() * VOCAB_SIZE);
+    float embed_alpha = 1.0f;
+    float embed_beta = 0.0f;
+    cublasStatus_t embed_status = cublasGemmEx(cublas_handle,
+                                               CUBLAS_OP_T,
+                                               CUBLAS_OP_N,
+                                               VOCAB_SIZE,
+                                               input_tokens.size(),
+                                               EMBEDDING_LENGTH,
+                                               &embed_alpha,
+                                               weights.embed_tokens,
+                                               CUDA_R_16BF,
+                                               EMBEDDING_LENGTH,
+                                               rms_norms,
+                                               CUDA_R_16BF,
+                                               EMBEDDING_LENGTH,
+                                               &embed_beta,
+                                               embed_proj,
+                                               CUDA_R_16BF,
+                                               VOCAB_SIZE,
+                                               CUBLAS_COMPUTE_32F,
+                                               CUBLAS_GEMM_DEFAULT);
+
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();

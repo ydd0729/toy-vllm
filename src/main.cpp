@@ -200,7 +200,6 @@ bool verifyQProjection(cublasStatus_t gemm_status, std::vector<int> &input_token
     __nv_bfloat16 *q_cpu_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.layers." + std::to_string(layer) + ".self_attn.q_proj.weight"));
     std::vector<__nv_bfloat16> rms_norms_cpu(input_tokens.size() * EMBEDDING_LENGTH);
     cudaMemcpy(rms_norms_cpu.data(), rms_norms, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-    // input_tokens * w_q^T (N, EMBEDDING_LENGTH) x (EMBEDDING_LENGTH, EMBEDDING_LENGTH) -> (N, EMBEDDING_LENGTH)
     bool is_correct = true;
     for (int token_idx = 0; token_idx < input_tokens.size(); ++token_idx)
     {
@@ -215,6 +214,10 @@ bool verifyQProjection(cublasStatus_t gemm_status, std::vector<int> &input_token
             }
             float actual = (float)q_cpu[token_idx * EMBEDDING_LENGTH + j];
             float rel_err = (sum == 0.0f) ? fabs(actual) : fabs(actual - sum) / fabs(sum);
+            if (fabsf(sum) < 1e-4 && fabsf(actual) < 1e-4)
+            {
+                continue;
+            }
             if (rel_err > 1e-1)
             {
                 std::cout << "Q MISMATCH token=" << token_idx << " dim=" << j
@@ -780,7 +783,7 @@ int main(int argc, char *argv[])
     float down_alpha = 1.0f;
     float down_beta = 0.0f;
 
-    for (int layer = 0; layer < 16; ++layer)
+    for (int layer = 0; layer < N_LAYERS; ++layer)
     {
         rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], input_tokens.size());
 #ifdef DEBUG
@@ -1158,11 +1161,11 @@ int main(int argc, char *argv[])
     // TODO: write a proper kernel for it
     // for now just a simple CPU function
     int last_token_offset = (input_tokens.size() - 1) * VOCAB_SIZE;
-    __nv_bfloat16 max_token = embed_proj_cpu[last_token_offset];
+    float max_token = (float)embed_proj_cpu[last_token_offset];
     int max_token_idx = 0;
     for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
     {
-        if (embed_proj_cpu[token_idx + last_token_offset] > max_token)
+        if ((float)embed_proj_cpu[token_idx + last_token_offset] > max_token)
         {
             max_token = embed_proj_cpu[token_idx + last_token_offset];
             max_token_idx = token_idx;

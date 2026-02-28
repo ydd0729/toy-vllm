@@ -785,6 +785,13 @@ int main(int argc, char *argv[])
 
     for (int layer = 0; layer < N_LAYERS; ++layer)
     {
+#ifdef DEBUG
+        std::vector<__nv_bfloat16> hs_debug(10);
+        cudaMemcpy(hs_debug.data(), hidden_state, 10 * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+        std::cout << "Layer " << layer << " input first 10 values (token 0):" << std::endl;
+        for (int i = 0; i < 10; ++i)
+            std::cout << "  [" << i << "] = " << (float)hs_debug[i] << std::endl;
+#endif
         rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], input_tokens.size());
 #ifdef DEBUG
         cudaDeviceSynchronize();

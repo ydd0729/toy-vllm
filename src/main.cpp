@@ -9,6 +9,8 @@
 
 using json = nlohmann::json;
 
+constexpr int MAX_NEW_TOKENS_GENERATED = 20; // TODO: parameterize it with program arguments
+
 constexpr int N_LAYERS = 16; // TODO: hardcoded for llama 3.2 1B, just like any other value for now
 constexpr int EMBEDDING_LENGTH = 2048;
 constexpr int HIDDEN_DIM = 8192;
@@ -20,6 +22,9 @@ constexpr int NUM_V_HEADS = 8;
 constexpr int GQA_Q_TO_K_RATIO = 4;
 constexpr int GQA_ATTN_SCORES_TO_V_RATIO = 4;
 constexpr int VOCAB_SIZE = 128256;
+constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>
+constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>
+constexpr int MAX_SEQ_LEN = 2048;            // TODO: make it tunable
 
 int checkGPUStatus()
 {
@@ -677,21 +682,13 @@ int main(int argc, char *argv[])
     }
 
     // LLM INPUT
-    std::vector<int> input_tokens;
-#ifdef DEBUG
-    input_tokens.push_back(128000);
-    input_tokens.push_back(791);
-    input_tokens.push_back(6864);
-    input_tokens.push_back(315);
-    input_tokens.push_back(9822);
-    input_tokens.push_back(374);
-#else
+    std::vector<int> input_tokens; // TODO: it's no longer input tokens only, but input tokens + generated tokens, so rename soon to something more relevant, maybe just "tokens" would be better
+    // or maybe have two separate vector, I don't know yet
     int token;
     while (std::cin >> token)
     {
         input_tokens.push_back(token);
     }
-#endif
 #ifdef DEBUG
     std::cout << "Input tokens:\n";
     for (auto &token : input_tokens)
@@ -699,7 +696,6 @@ int main(int argc, char *argv[])
         std::cout << token << "\n";
     }
 #endif
-
     int *gpu_input_tokens;
     cudaMalloc(&gpu_input_tokens, input_tokens.size() * sizeof(int));
     cudaMemcpy(gpu_input_tokens, input_tokens.data(), input_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
@@ -713,6 +709,7 @@ int main(int argc, char *argv[])
     // I have the same amount of embeddings as input tokens
     // it's just every embedding is EMBEDDING_LENGTH length bf16 vector
     // retrieved from model weights based on token's value
+
     __nv_bfloat16 *input_embeddings;
     cudaMalloc(&input_embeddings, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, input_tokens.size());
@@ -744,13 +741,17 @@ int main(int argc, char *argv[])
     float q_proj_alpha = 1.0f;
     float q_proj_beta = 0.0f;
 
-    __nv_bfloat16 *k_proj;
-    cudaMalloc(&k_proj, input_tokens.size() * sizeof(__nv_bfloat16) * KV_DIM);
+    // K and V cache
+    __nv_bfloat16 *k_proj[N_LAYERS];
+    __nv_bfloat16 *v_proj[N_LAYERS];
+    for (int layer = 0; layer < N_LAYERS; ++layer)
+    {
+        cudaMalloc(&k_proj[layer], MAX_SEQ_LEN * sizeof(__nv_bfloat16) * KV_DIM);
+        cudaMalloc(&v_proj[layer], MAX_SEQ_LEN * sizeof(__nv_bfloat16) * KV_DIM);
+    }
     float k_proj_alpha = 1.0f;
     float k_proj_beta = 0.0f;
 
-    __nv_bfloat16 *v_proj;
-    cudaMalloc(&v_proj, input_tokens.size() * sizeof(__nv_bfloat16) * KV_DIM);
     float v_proj_alpha = 1.0f;
     float v_proj_beta = 0.0f;
 
@@ -763,7 +764,7 @@ int main(int argc, char *argv[])
     float attn_scores_v_alpha = 1.0f;
     float attn_scores_v_beta = 0.0f;
 
-    __nv_bfloat16 *buf_2048_2; // TODO: share with o_proj and down
+    __nv_bfloat16 *buf_2048_2; // shared between o_proj and down
     cudaMalloc(&buf_2048_2, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     __nv_bfloat16 *o_proj;
     float o_proj_alpha = 1.0f;
@@ -783,6 +784,7 @@ int main(int argc, char *argv[])
     float down_alpha = 1.0f;
     float down_beta = 0.0f;
 
+    // PREFILL
     for (int layer = 0; layer < N_LAYERS; ++layer)
     {
 #ifdef DEBUG
@@ -893,7 +895,7 @@ int main(int argc, char *argv[])
         cudaMemcpy(k_before_rope.data(), k_proj, input_tokens.size() * KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
 #endif
         rope(q_proj, input_tokens.size(), EMBEDDING_LENGTH);
-        rope(k_proj, input_tokens.size(), KV_DIM);
+        rope(k_proj[layer], input_tokens.size(), KV_DIM);
 #ifdef DEBUG
         cudaDeviceSynchronize();
 
@@ -1183,6 +1185,15 @@ int main(int argc, char *argv[])
     }
     std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
 
+    cudaFree(attn_scores);
+    cudaMalloc(&attn_scores, sizeof(__nv_bfloat16) * MAX_SEQ_LEN * NUM_Q_HEADS);
+    // DECODE
+    int last_generated_token = max_token_idx;
+    std::vector<int> generated_tokens(MAX_SEQ_LEN - input_tokens.size());
+
+    while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && generated_tokens.size() < MAX_SEQ_LEN)
+    {
+    }
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();

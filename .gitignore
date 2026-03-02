@@ -45,3 +45,5 @@ node_modules/
 model.safetensors
 *.nsys-rep
 *.sqlite
+temp.txt
+temp*.md

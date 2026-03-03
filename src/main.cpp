@@ -916,7 +916,7 @@ int main(int argc, char *argv[])
         {
             int k_head_idx = i / GQA_Q_TO_K_RATIO;
             __nv_bfloat16 *q_head = q_proj + i * HEAD_DIM;
-            __nv_bfloat16 *k_head = k_proj + k_head_idx * HEAD_DIM;
+            __nv_bfloat16 *k_head = k_proj[layer] + k_head_idx * HEAD_DIM;
             __nv_bfloat16 *attn_score_head = attn_scores + input_tokens.size() * input_tokens.size() * i;
 
             cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
@@ -976,7 +976,7 @@ int main(int argc, char *argv[])
             int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
             // i * input_tokens.size() * input_tokens.size(),  because attn scores is (32, num_tok, num_tok)
             __nv_bfloat16 *attn_scores_head = attn_scores + i * input_tokens.size() * input_tokens.size();
-            __nv_bfloat16 *v_head = v_proj + v_head_idx * HEAD_DIM;
+            __nv_bfloat16 *v_head = v_proj[layer] + v_head_idx * HEAD_DIM;
             __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
 
             cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
@@ -1188,11 +1188,17 @@ int main(int argc, char *argv[])
     cudaFree(attn_scores);
     cudaMalloc(&attn_scores, sizeof(__nv_bfloat16) * MAX_SEQ_LEN * NUM_Q_HEADS);
     // DECODE
+    // since now I operate always on index 0 for all values and for current_position_token for new K and V
+
     int last_generated_token = max_token_idx;
     std::vector<int> generated_tokens(MAX_SEQ_LEN - input_tokens.size());
+    generated_tokens.push_back(last_generated_token);
+    int current_token_position = input_tokens.size() + generated_tokens.size();
 
-    while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && generated_tokens.size() < MAX_SEQ_LEN)
+    while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && current_token_position < MAX_SEQ_LEN)
     {
+        // TODO: make it more suitable for single token operations, perhaps just pass a token id as param
+        singleEmbeddingGather(last_generated_token, input_embeddings, weights.embed_tokens);
     }
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);

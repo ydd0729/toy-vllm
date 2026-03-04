@@ -4,6 +4,8 @@
 constexpr int HEAD_DIM = 64;
 constexpr int NUM_Q_HEADS = 32;
 
+// prefill / shared
+
 // gpu_input_tokens - N tokens
 // gpu_input_embeds - N * sizeof(__nv_bfloat16) * 2048
 // embed_tokens - (100000+smth, 2048)
@@ -22,29 +24,6 @@ void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __n
 {
     // even though embedding is 2048, I can only dispatch 1024 because it's max threads per block on my gpu
     embeddingGatherKernel<<<num_input_tokens, 1024>>>(gpu_input_tokens, gpu_input_embeds, embed_tokens, num_input_tokens);
-#ifdef DEBUG
-    cudaError error = cudaGetLastError();
-    if (error != cudaError::cudaSuccess)
-    {
-        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
-    }
-#endif
-}
-
-__global__ void singleEmbeddingGatherKernel(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
-{
-    int workIndex = threadIdx.x;
-    if (workIndex < 2048)
-    {
-        output[workIndex] = embed_tokens[input_token * 2048 + threadIdx.x];
-        output[workIndex + 1024] = embed_tokens[input_token * 2048 + threadIdx.x + 1024];
-    }
-}
-
-void singleEmbeddingGather(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
-{
-    // even though embedding is 2048, I can only dispatch 1024 because it's max threads per block on my gpu
-    singleEmbeddingGatherKernel<<<1, 1024>>>(input_token, output, embed_tokens);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
@@ -260,4 +239,64 @@ __global__ void siluKernel(__nv_bfloat16 *a, __nv_bfloat16 *b)
 void silu(__nv_bfloat16 *a, __nv_bfloat16 *b, int num_tokens)
 {
     siluKernel<<<num_tokens, 1024>>>(a, b);
+}
+
+// decode
+__global__ void embeddingGatherKernelDecode(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
+{
+    int workIndex = threadIdx.x;
+    if (workIndex < 2048)
+    {
+        output[workIndex] = embed_tokens[input_token * 2048 + threadIdx.x];
+        output[workIndex + 1024] = embed_tokens[input_token * 2048 + threadIdx.x + 1024];
+    }
+}
+
+void embeddingGatherDecode(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
+{
+    // even though embedding is 2048, I can only dispatch 1024 because it's max threads per block on my gpu
+    embeddingGatherKernelDecode<<<1, 1024>>>(input_token, output, embed_tokens);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+
+__global__ void ropeKernelDecode(__nv_bfloat16 *input, int offset, int proj_dim)
+{
+    if (2 * threadIdx.x + 1 + offset * proj_dim < (offset + 1) * proj_dim) // TODO: check correctness
+    {
+        // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel invocations
+        int double_i = 2 * (threadIdx.x % 32);
+        float theta = 1.0 / (pow(500000.0, ((float)double_i / HEAD_DIM)));
+        float angle = offset * theta;
+        __nv_bfloat16 prev_2i = input[2 * threadIdx.x + offset * proj_dim];
+        __nv_bfloat16 prev_2i_1 = input[2 * threadIdx.x + 1 + offset * proj_dim];
+        input[2 * threadIdx.x + offset * proj_dim] = (__nv_bfloat16)((float)prev_2i * cos(angle) - (float)prev_2i_1 * sin(angle));
+        input[2 * threadIdx.x + 1 + offset * proj_dim] = (__nv_bfloat16)((float)prev_2i * sin(angle) + (float)prev_2i_1 * cos(angle));
+    }
+}
+
+// proj_dim: q_proj 2048, k_proj 512
+// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512 for k_proj)
+void ropeDecode(__nv_bfloat16 *input, int offset, int proj_dim)
+{
+    int num_threads = proj_dim / 2;
+    if (num_threads > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, RoPE kernel not launched";
+        return;
+    }
+
+    ropeKernel<<<1, num_threads>>>(input, offset, proj_dim);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
 }

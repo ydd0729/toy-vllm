@@ -859,7 +859,7 @@ int main(int argc, char *argv[])
                                                     CUDA_R_16BF,
                                                     EMBEDDING_LENGTH,
                                                     &k_proj_beta,
-                                                    k_proj,
+                                                    k_proj[layer],
                                                     CUDA_R_16BF,
                                                     KV_DIM,
                                                     CUBLAS_COMPUTE_32F,
@@ -880,7 +880,7 @@ int main(int argc, char *argv[])
                                                     CUDA_R_16BF,
                                                     EMBEDDING_LENGTH,
                                                     &v_proj_beta,
-                                                    v_proj,
+                                                    v_proj[layer],
                                                     CUDA_R_16BF,
                                                     KV_DIM,
                                                     CUBLAS_COMPUTE_32F,
@@ -1191,14 +1191,15 @@ int main(int argc, char *argv[])
     // since now I operate always on index 0 for all values and for current_position_token for new K and V
 
     int last_generated_token = max_token_idx;
-    std::vector<int> generated_tokens(MAX_SEQ_LEN - input_tokens.size());
+    std::vector<int> generated_tokens;
+    generated_tokens.reserve(MAX_SEQ_LEN - input_tokens.size());
     generated_tokens.push_back(last_generated_token);
     int current_token_position = input_tokens.size() + generated_tokens.size();
 
     while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && current_token_position < MAX_SEQ_LEN)
     {
         // TODO: make it more suitable for single token operations, perhaps just pass a token id as param
-        singleEmbeddingGather(last_generated_token, hidden_state, weights.embed_tokens);
+        embeddingGatherDecode(last_generated_token, hidden_state, weights.embed_tokens);
         for (int layer = 0; layer < N_LAYERS; ++layer)
         {
             rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], 1);
@@ -1236,7 +1237,7 @@ int main(int argc, char *argv[])
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH,
                          &k_proj_beta,
-                         k_proj,
+                         k_proj[layer] + current_token_position * KV_DIM,
                          CUDA_R_16BF,
                          KV_DIM,
                          CUBLAS_COMPUTE_32F,
@@ -1255,13 +1256,13 @@ int main(int argc, char *argv[])
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH,
                          &v_proj_beta,
-                         v_proj,
+                         v_proj[layer] + current_token_position * KV_DIM,
                          CUDA_R_16BF,
                          KV_DIM,
                          CUBLAS_COMPUTE_32F,
                          CUBLAS_GEMM_DEFAULT);
-            rope(q_proj, 1, EMBEDDING_LENGTH);
-            rope(k_proj[layer], 1, KV_DIM);
+            ropeDecode(q_proj, current_token_position, EMBEDDING_LENGTH);
+            ropeDecode(k_proj[layer], current_token_position, KV_DIM);
         }
     }
     std::cout << "\nOk bye!\n";

@@ -11,4 +11,5 @@ void residualAdd(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_toke
 void silu(__nv_bfloat16 *a, __nv_bfloat16 *b, int num_tokens);
 
 // decode
-void singleEmbeddingGather(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens);
+void embeddingGatherDecode(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens);
+void ropeDecode(__nv_bfloat16 *input, int offset, int proj_dim);

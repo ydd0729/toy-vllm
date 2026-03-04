@@ -265,24 +265,24 @@ void embeddingGatherDecode(int input_token, __nv_bfloat16 *output, __nv_bfloat16
 #endif
 }
 
-__global__ void ropeKernelDecode(__nv_bfloat16 *input, int offset, int proj_dim)
+__global__ void ropeKernelDecode(__nv_bfloat16 *input, int position_in_sequence, int proj_dim)
 {
-    if (2 * threadIdx.x + 1 + offset * proj_dim < (offset + 1) * proj_dim) // TODO: check correctness
+    if (2 * threadIdx.x + 1 < proj_dim) // TODO: check correctness
     {
         // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel invocations
         int double_i = 2 * (threadIdx.x % 32);
         float theta = 1.0 / (pow(500000.0, ((float)double_i / HEAD_DIM)));
-        float angle = offset * theta;
-        __nv_bfloat16 prev_2i = input[2 * threadIdx.x + offset * proj_dim];
-        __nv_bfloat16 prev_2i_1 = input[2 * threadIdx.x + 1 + offset * proj_dim];
-        input[2 * threadIdx.x + offset * proj_dim] = (__nv_bfloat16)((float)prev_2i * cos(angle) - (float)prev_2i_1 * sin(angle));
-        input[2 * threadIdx.x + 1 + offset * proj_dim] = (__nv_bfloat16)((float)prev_2i * sin(angle) + (float)prev_2i_1 * cos(angle));
+        float angle = position_in_sequence * theta;
+        __nv_bfloat16 prev_2i = input[2 * threadIdx.x];
+        __nv_bfloat16 prev_2i_1 = input[2 * threadIdx.x + 1];
+        input[2 * threadIdx.x] = (__nv_bfloat16)((float)prev_2i * cos(angle) - (float)prev_2i_1 * sin(angle));
+        input[2 * threadIdx.x + 1] = (__nv_bfloat16)((float)prev_2i * sin(angle) + (float)prev_2i_1 * cos(angle));
     }
 }
 
 // proj_dim: q_proj 2048, k_proj 512
 // num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512 for k_proj)
-void ropeDecode(__nv_bfloat16 *input, int offset, int proj_dim)
+void ropeDecode(__nv_bfloat16 *input, int position_in_sequence, int proj_dim)
 {
     int num_threads = proj_dim / 2;
     if (num_threads > 1024)
@@ -291,7 +291,7 @@ void ropeDecode(__nv_bfloat16 *input, int offset, int proj_dim)
         return;
     }
 
-    ropeKernelDecode<<<1, num_threads>>>(input, offset, proj_dim);
+    ropeKernelDecode<<<1, num_threads>>>(input, position_in_sequence, proj_dim);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)

@@ -12,4 +12,4 @@ void silu(__nv_bfloat16 *a, __nv_bfloat16 *b, int num_tokens);
 
 // decode
 void embeddingGatherDecode(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens);
-void ropeDecode(__nv_bfloat16 *input, int offset, int proj_dim);
+void ropeDecode(__nv_bfloat16 *input, int position_in_sequence, int proj_dim);

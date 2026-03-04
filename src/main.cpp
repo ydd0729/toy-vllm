@@ -1262,7 +1262,7 @@ int main(int argc, char *argv[])
                          CUBLAS_COMPUTE_32F,
                          CUBLAS_GEMM_DEFAULT);
             ropeDecode(q_proj, current_token_position, EMBEDDING_LENGTH);
-            ropeDecode(k_proj[layer], current_token_position, KV_DIM);
+            ropeDecode(k_proj[layer] + current_token_position * KV_DIM, current_token_position, KV_DIM);
         }
     }
     std::cout << "\nOk bye!\n";

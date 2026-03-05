@@ -3,6 +3,7 @@
 
 constexpr int HEAD_DIM = 64;
 constexpr int NUM_Q_HEADS = 32;
+constexpr int MAX_SEQ_LEN = 2048;
 
 // prefill / shared
 
@@ -292,6 +293,70 @@ void ropeDecode(__nv_bfloat16 *input, int position_in_sequence, int proj_dim)
     }
 
     ropeKernelDecode<<<1, num_threads>>>(input, position_in_sequence, proj_dim);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+
+// seq_len increases by 1 with every new token
+__global__ void softmaxKernelDecode(__nv_bfloat16 *input, int seq_len)
+{
+    // softmaxxing per head
+    // might waste a lot of memory by hardcoding the size here but can't use num_tokens directly
+    __shared__ float row[1024]; // row[0] will contain max value after the loop
+    __shared__ float max_val;
+    // find max of the row to subtract it for numerical stability
+    int workIndex = blockIdx.x * MAX_SEQ_LEN + threadIdx.x;
+    __nv_bfloat16 token = input[workIndex];
+    row[threadIdx.x] = (float)token;
+    __syncthreads();
+
+    for (int i = 1; i < seq_len; i = i * 2)
+    {
+        if (threadIdx.x % (i * 2) == 0 && threadIdx.x + i < seq_len)
+        {
+            row[threadIdx.x] = fmaxf(row[threadIdx.x], row[threadIdx.x + i]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+    {
+        max_val = row[0]; // so I don't need to allocate another shared value for max_val
+    }
+    __syncthreads();
+
+    // turn into exp
+    row[threadIdx.x] = expf((float)token - max_val);
+    __syncthreads();
+
+    // now I can compute the numerical stable sum, similar pattern - tree reduction
+    // reusing row memory
+    for (int i = 1; i < seq_len; i = i * 2)
+    {
+        if (threadIdx.x % (i * 2) == 0 && threadIdx.x + i < seq_len)
+        {
+            row[threadIdx.x] = row[threadIdx.x] + row[threadIdx.x + i];
+        }
+        __syncthreads();
+    }
+
+    input[workIndex] = (__nv_bfloat16)(expf((float)token - max_val) / row[0]);
+}
+
+// input are masked attention scores (NUM_Q_HEADS, seq_len)
+void softmaxDecode(__nv_bfloat16 *input, int seq_len)
+{
+    if (seq_len > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, Softmax kernel not launched";
+        return;
+    }
+
+    softmaxKernelDecode<<<NUM_Q_HEADS, seq_len>>>(input, seq_len);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)

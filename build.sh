@@ -1,3 +1,3 @@
 rm -rf build/
 mkdir -p build
-cd build && cmake -DCMAKE_BUILD_TYPE=Debug .. -G Ninja && ninja
+cd build && cmake .. -G Ninja && ninja

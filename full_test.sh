@@ -1,1 +1,3 @@
-python python/tokenizer.py "The capital of France is" | ./test.sh
+python python/tokenizer.py "<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+
+What is the capital of France?<|eot_id|><|start_header_id|>assistant<|end_header_id|>" | ./test.sh

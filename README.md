@@ -4,12 +4,13 @@ High performance minimal LLM inference engine, a younger sibling of vLLM, writte
 I build the project based on the vLLM paper [Efficient Memory Management for Large Language
 Model Serving with PagedAttention](https://arxiv.org/pdf/2309.06180)
 
-- load a LLM model from safetensors
-- full LLM forward pass
-- CUDA kernels for attention etc
-- KV cache as described in the paper
-- PagedAttention
-- batching
+- [x] load a real LLM model from safetensors (Llama 3.2 1B Instruct)
+- [x] full LLM forward pass (prefill + decode)
+- [x] all computation with CUDA kernels
+- [x] KV cache
+- [ ] static batching (in progress)
+- [ ] continuous batching
+- [ ] PagedAttention
 
 External libraries:
 

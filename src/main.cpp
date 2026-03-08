@@ -684,11 +684,67 @@ int main(int argc, char *argv[])
     // LLM INPUT
     std::vector<int> input_tokens; // TODO: it's no longer input tokens only, but input tokens + generated tokens, so rename soon to something more relevant, maybe just "tokens" would be better
     // or maybe have two separate vector, I don't know yet
-    int token;
-    while (std::cin >> token)
+    // int token;
+    // while (std::cin >> token)
+    // {
+    //     input_tokens.push_back(token);
+    // }
+    std::vector<std::vector<int>> inputs;
+    std::vector<int> first_prompt;
+    first_prompt.push_back(128000);
+    first_prompt.push_back(791);
+    first_prompt.push_back(6864);
+    first_prompt.push_back(315);
+    first_prompt.push_back(9822);
+    first_prompt.push_back(374);
+    inputs.push_back(first_prompt);
+
+    std::vector<int> second_prompt;
+    second_prompt.push_back(128000);
+    second_prompt.push_back(791);
+    second_prompt.push_back(11495);
+    second_prompt.push_back(33084);
+    second_prompt.push_back(13962);
+    second_prompt.push_back(3363);
+    second_prompt.push_back(374);
+    inputs.push_back(second_prompt);
+
+    std::vector<int> third_prompt;
+    third_prompt.push_back(128000);
+    third_prompt.push_back(15000);
+    third_prompt.push_back(819);
+    third_prompt.push_back(1183);
+    third_prompt.push_back(62791);
+    third_prompt.push_back(17610);
+    third_prompt.push_back(315);
+    third_prompt.push_back(25);
+    inputs.push_back(third_prompt);
+
+    std::vector<int> fourth_prompt;
+    fourth_prompt.push_back(128000);
+    fourth_prompt.push_back(47);
+    fourth_prompt.push_back(9700);
+    fourth_prompt.push_back(3458);
+    fourth_prompt.push_back(19699);
+    fourth_prompt.push_back(9686);
+    fourth_prompt.push_back(54485);
+    fourth_prompt.push_back(220);
+    inputs.push_back(fourth_prompt);
+
+    int num_inputs = inputs.size();
+    int max_input_len = first_prompt.size();
+    int max_input_idx = 0;
+    int batched_inputs_size = first_prompt.size();
+    for (int i = 1; i < num_inputs; ++i)
     {
-        input_tokens.push_back(token);
+        batched_inputs_size += inputs[i].size();
+        if (inputs[i].size() > max_input_len)
+        {
+            max_input_len = inputs[i].size();
+            max_input_idx = i;
+        }
     }
+
 #ifdef DEBUG
     std::cout << "Input tokens:\n";
     for (auto &token : input_tokens)
@@ -697,8 +753,8 @@ int main(int argc, char *argv[])
     }
 #endif
     int *gpu_input_tokens;
-    cudaMalloc(&gpu_input_tokens, input_tokens.size() * sizeof(int));
-    cudaMemcpy(gpu_input_tokens, input_tokens.data(), input_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc(&gpu_input_tokens, batched_inputs_size * sizeof(int));
+    cudaMemcpy(gpu_input_tokens, input_tokens.data(), batched_inputs_size * sizeof(int), cudaMemcpyHostToDevice);
 #ifdef DEBUG
     if (!verifyInputTokensCopy(input_tokens, gpu_input_tokens))
     {
@@ -711,7 +767,7 @@ int main(int argc, char *argv[])
     // retrieved from model weights based on token's value
 
     __nv_bfloat16 *input_embeddings;
-    cudaMalloc(&input_embeddings, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    cudaMalloc(&input_embeddings, batched_inputs_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, input_tokens.size());
 #ifdef DEBUG
     cudaDeviceSynchronize();

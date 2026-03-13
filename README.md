@@ -8,8 +8,8 @@ Model Serving with PagedAttention](https://arxiv.org/pdf/2309.06180)
 - [x] full LLM forward pass (prefill + decode)
 - [x] all computation with CUDA kernels
 - [x] KV cache
-- [ ] static batching (in progress)
-- [ ] continuous batching
+- [x] static batching
+- [ ] continuous batching (in progress)
 - [ ] PagedAttention
 
 External libraries:

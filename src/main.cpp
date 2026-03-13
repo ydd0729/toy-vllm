@@ -2,6 +2,7 @@
 #include <fstream>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <queue>
 #define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include "json.hpp"
 #include "kernels.cuh"
@@ -25,7 +26,7 @@ constexpr int VOCAB_SIZE = 128256;
 constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>
 constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>
 constexpr int MAX_SEQ_LEN = 2048;            // TODO: make it tunable
-constexpr int BATCH_SIZE = 4;                // TODO: not even close to being good
+constexpr int BATCH_SIZE = 2;                // TODO: not even close to being good
 
 int checkGPUStatus()
 {
@@ -141,93 +142,59 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // LLM INPUT
-    std::vector<int> tokens_in_batch; // I want to use it in place of input_tokens
-    int current_batch_size;
+    // PROMPT 0 (What is 2+2?) - length 17
+    std::queue<std::vector<int>> queue;
+    queue.push({128000, 128006, 882, 128007, 271, 3923, 374, 220, 17, 10, 17, 30, 128009, 128006, 78191, 128007, 271});
 
-    std::vector<int> input_tokens; // all tokens from all batch items concatenated
+    // PROMPT 1 (Name a color.) - length 14
+    queue.push({128000, 128006, 882, 128007, 271, 678, 264, 1933, 13, 128009, 128006, 78191, 128007, 271});
+
+    // PROMPT 2 (Say hello.) - length 13
+    queue.push({128000, 128006, 882, 128007, 271, 46864, 24748, 13, 128009, 128006, 78191, 128007, 271});
+
+    // PROMPT 3 (Capital of France?) - length 14
+    queue.push({128000, 128006, 882, 128007, 271, 64693, 315, 9822, 30, 128009, 128006, 78191, 128007, 271});
+
+    // BATCH
+    std::vector<bool> slots_availability(BATCH_SIZE, true); // set to false when slot taken, set to true when free
+    std::vector<int> input_tokens();                        // all tokens from all batch items concatenated; NOW IT REPRESENTS CURRENT BATCH, NOT ALL TOKENS
     int input_tokens_size;
 
     std::vector<int> prompt_offsets; // indicate where the next prompt starts - same size as prompt_lengths, they have to match by index
-    // TODO: recalculate prompt_offsets, current_batch_size and prompt_lengths always when there is a change to tokens_in_batch
+    // TODO: recalculate prompt_offsets, input_tokens_size and prompt_lengths always when there is a change to input_tokens
     std::vector<int> prompt_lengths; // indicates length of each prompt
-    // int token;
-    // while (std::cin >> token)
-    // {
-    //     input_tokens.push_back(token);
-    // }
     // TODO: right now I handle input manually, it's the least interesting part, will come back to it when continuous batching and pagedattn works
-    // PROMPT 0 (What is 2+2?) - length 17
-    input_tokens.push_back(128000);
-    input_tokens.push_back(128006);
-    input_tokens.push_back(882);
-    input_tokens.push_back(128007);
-    input_tokens.push_back(271);
-    input_tokens.push_back(3923);
-    input_tokens.push_back(374);
-    input_tokens.push_back(220);
-    input_tokens.push_back(17);
-    input_tokens.push_back(10);
-    input_tokens.push_back(17);
-    input_tokens.push_back(30);
-    input_tokens.push_back(128009);
-    input_tokens.push_back(128006);
-    input_tokens.push_back(78191);
-    input_tokens.push_back(128007);
-    input_tokens.push_back(271);
+
+    std::vector<int> queue_front;
+
+    for (int slot = 0; slot < slots_availability.size(); ++i)
+    {
+        if (!slots_availability[slot])
+        {
+            continue; // slot taken, skip
+        }
+        if (queue.size() > 0)
+        {
+            queue_front = queue.front();
+            auto slot_position_in_batch = input_tokens[slot * EMBEDDING_LENGTH];
+            for (int j = 0; j < queue_front.size(); j++)
+            {
+                input_tokens.push_back(queue_front[j]); // TODO: inefficient
+            }
+            queue.pop();
+            slots_availability[slot] = false;
+        }
+    }
+
     prompt_offsets.push_back(0);
     prompt_lengths.push_back(17);
 
-    // PROMPT 1 (Name a color.) - length 14
-    input_tokens.push_back(128000);
-    input_tokens.push_back(128006);
-    input_tokens.push_back(882);
-    input_tokens.push_back(128007);
-    input_tokens.push_back(271);
-    input_tokens.push_back(678);
-    input_tokens.push_back(264);
-    input_tokens.push_back(1933);
-    input_tokens.push_back(13);
-    input_tokens.push_back(128009);
-    input_tokens.push_back(128006);
-    input_tokens.push_back(78191);
-    input_tokens.push_back(128007);
-    input_tokens.push_back(271);
     prompt_offsets.push_back(17);
     prompt_lengths.push_back(14);
 
-    // PROMPT 2 (Say hello.) - length 13
-    input_tokens.push_back(128000);
-    input_tokens.push_back(128006);
-    input_tokens.push_back(882);
-    input_tokens.push_back(128007);
-    input_tokens.push_back(271);
-    input_tokens.push_back(46864);
-    input_tokens.push_back(24748);
-    input_tokens.push_back(13);
-    input_tokens.push_back(128009);
-    input_tokens.push_back(128006);
-    input_tokens.push_back(78191);
-    input_tokens.push_back(128007);
-    input_tokens.push_back(271);
     prompt_offsets.push_back(31);
     prompt_lengths.push_back(13);
 
-    // PROMPT 3 (Capital of France?) - length 14
-    input_tokens.push_back(128000);
-    input_tokens.push_back(128006);
-    input_tokens.push_back(882);
-    input_tokens.push_back(128007);
-    input_tokens.push_back(271);
-    input_tokens.push_back(64693);
-    input_tokens.push_back(315);
-    input_tokens.push_back(9822);
-    input_tokens.push_back(30);
-    input_tokens.push_back(128009);
-    input_tokens.push_back(128006);
-    input_tokens.push_back(78191);
-    input_tokens.push_back(128007);
-    input_tokens.push_back(271);
     prompt_offsets.push_back(44);
     prompt_lengths.push_back(14);
 

@@ -693,53 +693,82 @@ int main(int argc, char *argv[])
     //     input_tokens.push_back(token);
     // }
     // TODO: right now I handle input manually, it's the least interesting part, will come back to it when continuous batching and pagedattn works
-    // FIRST PROMPT
+    // PROMPT 0 (What is 2+2?) - length 17
     input_tokens.push_back(128000);
-    input_tokens.push_back(791);
-    input_tokens.push_back(6864);
+    input_tokens.push_back(128006);
+    input_tokens.push_back(882);
+    input_tokens.push_back(128007);
+    input_tokens.push_back(271);
+    input_tokens.push_back(3923);
+    input_tokens.push_back(374);
+    input_tokens.push_back(220);
+    input_tokens.push_back(17);
+    input_tokens.push_back(10);
+    input_tokens.push_back(17);
+    input_tokens.push_back(30);
+    input_tokens.push_back(128009);
+    input_tokens.push_back(128006);
+    input_tokens.push_back(78191);
+    input_tokens.push_back(128007);
+    input_tokens.push_back(271);
+    prompt_offsets.push_back(0);
+    prompt_lengths.push_back(17);
+
+    // PROMPT 1 (Name a color.) - length 14
+    input_tokens.push_back(128000);
+    input_tokens.push_back(128006);
+    input_tokens.push_back(882);
+    input_tokens.push_back(128007);
+    input_tokens.push_back(271);
+    input_tokens.push_back(678);
+    input_tokens.push_back(264);
+    input_tokens.push_back(1933);
+    input_tokens.push_back(13);
+    input_tokens.push_back(128009);
+    input_tokens.push_back(128006);
+    input_tokens.push_back(78191);
+    input_tokens.push_back(128007);
+    input_tokens.push_back(271);
+    prompt_offsets.push_back(17);
+    prompt_lengths.push_back(14);
+
+    // PROMPT 2 (Say hello.) - length 13
+    input_tokens.push_back(128000);
+    input_tokens.push_back(128006);
+    input_tokens.push_back(882);
+    input_tokens.push_back(128007);
+    input_tokens.push_back(271);
+    input_tokens.push_back(46864);
+    input_tokens.push_back(24748);
+    input_tokens.push_back(13);
+    input_tokens.push_back(128009);
+    input_tokens.push_back(128006);
+    input_tokens.push_back(78191);
+    input_tokens.push_back(128007);
+    input_tokens.push_back(271);
+    prompt_offsets.push_back(31);
+    prompt_lengths.push_back(13);
+
+    // PROMPT 3 (Capital of France?) - length 14
+    input_tokens.push_back(128000);
+    input_tokens.push_back(128006);
+    input_tokens.push_back(882);
+    input_tokens.push_back(128007);
+    input_tokens.push_back(271);
+    input_tokens.push_back(64693);
     input_tokens.push_back(315);
     input_tokens.push_back(9822);
-    input_tokens.push_back(374);
-    prompt_offsets.push_back(0);
-    prompt_lengths.push_back(6);
-
-    // SECOND PROMPT
-    input_tokens.push_back(128000);
-    input_tokens.push_back(791);
-    input_tokens.push_back(11495);
-    input_tokens.push_back(33084);
-    input_tokens.push_back(13962);
-    input_tokens.push_back(3363);
-    input_tokens.push_back(374);
-    prompt_offsets.push_back(6);
-    prompt_lengths.push_back(7);
-
-    // THIRD PROMPT
-    input_tokens.push_back(128000);
-    input_tokens.push_back(15000);
-    input_tokens.push_back(819);
-    input_tokens.push_back(1183);
-    input_tokens.push_back(62791);
-    input_tokens.push_back(17610);
-    input_tokens.push_back(315);
-    input_tokens.push_back(25);
-    prompt_offsets.push_back(14);
-    prompt_lengths.push_back(8);
-
-    // FOURTH PROMPT
-    input_tokens.push_back(128000);
-    input_tokens.push_back(47);
-    input_tokens.push_back(9700);
-    input_tokens.push_back(3458);
-    input_tokens.push_back(19699);
-    input_tokens.push_back(9686);
-    input_tokens.push_back(54485);
-    input_tokens.push_back(220);
-    prompt_offsets.push_back(22);
-    prompt_lengths.push_back(8);
+    input_tokens.push_back(30);
+    input_tokens.push_back(128009);
+    input_tokens.push_back(128006);
+    input_tokens.push_back(78191);
+    input_tokens.push_back(128007);
+    input_tokens.push_back(271);
+    prompt_offsets.push_back(44);
+    prompt_lengths.push_back(14);
 
     input_tokens_size = input_tokens.size();
-    int max_input_len = 8;                                      // yes, I set it manualy for now. TODO automate it
+    int max_input_len = 17;                                     // yes, I set it manualy for now. TODO automate it
     int num_prompts = 4;                                        // same
     int max_buffer_size = std::max(max_input_len, num_prompts); // it will make more sense once the aboves are not hardcoded
 

@@ -62,7 +62,7 @@ struct Weights
     __nv_bfloat16 *norm;
 };
 
-int main(int argc, char *argv[])
+int loadWeights(Weights &weights)
 {
     if (checkGPUStatus() != 0)
     {
@@ -116,7 +116,6 @@ int main(int argc, char *argv[])
     // BASICALLY A HELPER STRUCT TO HAVE AN EASY ACCESS TO ANY MODEL WEIGHTS ON GPU
     // TODO: right now I know the model structure since it's always llama 3.2 1B-Instruct, but maybe it would be convenient
     //       to store dimensions somewhere for even easier access?
-    Weights weights{};
     weights.embed_tokens = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.embed_tokens.weight"));
     weights.norm = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.norm.weight"));
     for (int i = 0; i < N_LAYERS; ++i)
@@ -131,12 +130,27 @@ int main(int argc, char *argv[])
         weights.w_q[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".self_attn.q_proj.weight"));
         weights.w_v[i] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".self_attn.v_proj.weight"));
     }
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    Weights weights{};
+    if (loadWeights(weights) != 0)
+    {
+        return 1;
+    }
 
     // LLM INPUT
-    std::vector<int> input_tokens;   // all tokens from all batch items concatenated
-    std::vector<int> prompt_offsets; // indicate where the next prompt starts - same size as prompt_lengths, they have to match by index
-    std::vector<int> prompt_lengths; // indicates length of each prompt
+    std::vector<int> tokens_in_batch; // I want to use it in place of input_tokens
+    int current_batch_size;
+
+    std::vector<int> input_tokens; // all tokens from all batch items concatenated
     int input_tokens_size;
+
+    std::vector<int> prompt_offsets; // indicate where the next prompt starts - same size as prompt_lengths, they have to match by index
+    // TODO: recalculate prompt_offsets, current_batch_size and prompt_lengths always when there is a change to tokens_in_batch
+    std::vector<int> prompt_lengths; // indicates length of each prompt
     // int token;
     // while (std::cin >> token)
     // {

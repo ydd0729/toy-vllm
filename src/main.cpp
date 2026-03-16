@@ -659,7 +659,7 @@ int main(int argc, char *argv[])
                 {
                     continue;
                 }
-
+                generated_tokens[slot].clear();
                 prefill(prompt, queue, prompt_len, is_slot_free, slot, gpu_input_tokens, input_embeddings, weights, hidden_state, rms_norms, q_proj, buf_2048_1, cublas_handle, q_proj_alpha, q_proj_beta, k_proj_alpha, k_proj_beta, k_proj, v_proj_alpha, v_proj_beta, v_proj, prefill_attn_scores, attn_alpha, attn_beta, attn_scores_v, attn_scores_v_alpha, attn_scores_v_beta, o_proj, buf_2048_2, o_proj_alpha, o_proj_beta, gate_alpha, gate_beta, gate, up_alpha, up_beta, up, down, down_alpha, down_beta, embed_alpha, embed_beta, embed_proj, embed_proj_cpu, generated_tokens, last_generated_tokens, current_prompt_len);
             }
             active_slots.push_back(slot);
@@ -668,6 +668,10 @@ int main(int argc, char *argv[])
         int num_active_slots = active_slots.size();
         if (num_active_slots == 0)
         {
+            if (queue.empty())
+            {
+                break; // TODO: continue will make sense when I will finally write to queue, for now it has predefined size so break instead
+            }
             continue;
         }
 
@@ -739,7 +743,7 @@ int main(int argc, char *argv[])
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
                 int active_slot = active_slots[slot];
-                cudaMemcpy(k_proj[active_slot][layer] + current_prompt_len[active_slot] * KV_DIM, kv_proj_batched_buffer + active_slot * KV_DIM, sizeof(__nv_bfloat16) * KV_DIM, cudaMemcpyDeviceToDevice);
+                cudaMemcpy(k_proj[active_slot][layer] + current_prompt_len[active_slot] * KV_DIM, kv_proj_batched_buffer + slot * KV_DIM, sizeof(__nv_bfloat16) * KV_DIM, cudaMemcpyDeviceToDevice);
             }
 
             // same
@@ -766,13 +770,13 @@ int main(int argc, char *argv[])
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
                 int active_slot = active_slots[slot];
-                cudaMemcpy(v_proj[active_slot][layer] + current_prompt_len[active_slot] * KV_DIM, kv_proj_batched_buffer + active_slot * KV_DIM, sizeof(__nv_bfloat16) * KV_DIM, cudaMemcpyDeviceToDevice);
+                cudaMemcpy(v_proj[active_slot][layer] + current_prompt_len[active_slot] * KV_DIM, kv_proj_batched_buffer + slot * KV_DIM, sizeof(__nv_bfloat16) * KV_DIM, cudaMemcpyDeviceToDevice);
             }
 
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
                 int active_slot = active_slots[slot];
-                ropeDecode(&q_proj[active_slot * EMBEDDING_LENGTH], current_prompt_len[active_slot], EMBEDDING_LENGTH);
+                ropeDecode(&q_proj[slot * EMBEDDING_LENGTH], current_prompt_len[active_slot], EMBEDDING_LENGTH);
                 ropeDecode(k_proj[active_slot][layer] + current_prompt_len[active_slot] * KV_DIM, current_prompt_len[active_slot], KV_DIM);
             }
 
@@ -783,7 +787,7 @@ int main(int argc, char *argv[])
                 for (int i = 0; i < NUM_Q_HEADS; ++i)
                 {
                     int k_head_idx = i / GQA_Q_TO_K_RATIO;
-                    __nv_bfloat16 *q_head = q_proj + active_slot * EMBEDDING_LENGTH + i * HEAD_DIM;
+                    __nv_bfloat16 *q_head = q_proj + slot * EMBEDDING_LENGTH + i * HEAD_DIM;
                     __nv_bfloat16 *k_head = k_proj[active_slot][layer] + k_head_idx * HEAD_DIM;
                     __nv_bfloat16 *attn_score_head = decode_attn_scores + MAX_SEQ_LEN * i;
 
@@ -816,7 +820,7 @@ int main(int argc, char *argv[])
                     int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
                     __nv_bfloat16 *attn_scores_head = decode_attn_scores + i * MAX_SEQ_LEN;
                     __nv_bfloat16 *v_head = v_proj[active_slot][layer] + v_head_idx * HEAD_DIM;
-                    __nv_bfloat16 *output_attn_scores_head = attn_scores_v + active_slot * EMBEDDING_LENGTH + i * HEAD_DIM;
+                    __nv_bfloat16 *output_attn_scores_head = attn_scores_v + slot * EMBEDDING_LENGTH + i * HEAD_DIM;
 
                     cublasGemmEx(cublas_handle,
                                  CUBLAS_OP_N,
@@ -962,6 +966,7 @@ int main(int argc, char *argv[])
         int max_token_idx = 0;
         for (int slot = 0; slot < num_active_slots; ++slot)
         {
+            int active_slot = active_slots[slot];
             max_token = (float)embed_proj_cpu[slot * VOCAB_SIZE]; // TODO: verify if float is good enough in place of nvbf16
             max_token_idx = 0;
             for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
@@ -974,15 +979,15 @@ int main(int argc, char *argv[])
             }
             // TODO: wrap with #ifdef DEBUG
             std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
-            if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID || current_prompt_len[slot] == MAX_SEQ_LEN - 1)
+            if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID || current_prompt_len[active_slot] == MAX_SEQ_LEN - 1)
             {
-                is_slot_free[slot] = true;
+                is_slot_free[active_slot] = true;
             }
             else
             {
-                last_generated_tokens[slot] = max_token_idx;
-                generated_tokens[slot].push_back(max_token_idx);
-                current_prompt_len[slot] = current_prompt_len[slot] + 1;
+                last_generated_tokens[active_slot] = max_token_idx;
+                generated_tokens[active_slot].push_back(max_token_idx);
+                current_prompt_len[active_slot] = current_prompt_len[active_slot] + 1;
             }
         }
     }

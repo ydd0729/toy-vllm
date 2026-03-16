@@ -136,6 +136,366 @@ int loadWeights(Weights &weights)
     return 0;
 }
 
+void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int &prompt_len, std::vector<bool> &is_slot_free, int slot, int *gpu_input_tokens, nv_bfloat16 *input_embeddings, Weights &weights, nv_bfloat16 *hidden_state, nv_bfloat16 *rms_norms, nv_bfloat16 *&q_proj, nv_bfloat16 *buf_2048_1, cublasHandle_t cublas_handle, float &q_proj_alpha, float &q_proj_beta, float &k_proj_alpha, float &k_proj_beta, nv_bfloat16 *k_proj[2][16], float &v_proj_alpha, float &v_proj_beta, nv_bfloat16 *v_proj[2][16], nv_bfloat16 *prefill_attn_scores, float &attn_alpha, float &attn_beta, nv_bfloat16 *&attn_scores_v, float &attn_scores_v_alpha, float &attn_scores_v_beta, nv_bfloat16 *&o_proj, nv_bfloat16 *buf_2048_2, float &o_proj_alpha, float &o_proj_beta, float &gate_alpha, float &gate_beta, nv_bfloat16 *gate, float &up_alpha, float &up_beta, nv_bfloat16 *up, nv_bfloat16 *&down, float &down_alpha, float &down_beta, float &embed_alpha, float &embed_beta, nv_bfloat16 *embed_proj, std::vector<nv_bfloat16> &embed_proj_cpu, std::vector<std::vector<int>> &generated_tokens, std::vector<int> &last_generated_tokens, std::vector<int> &current_prompt_len)
+{
+    prompt = queue.front();
+    prompt_len = prompt.size();
+    queue.pop();
+    is_slot_free[slot] = false;
+
+    // TODO: prefill here, ending up with firs output token
+    cudaMemcpy(gpu_input_tokens, prompt.data(), prompt_len * sizeof(int), cudaMemcpyHostToDevice);
+    embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, prompt_len);
+
+    cudaMemcpy(hidden_state,
+               input_embeddings,
+               prompt_len * EMBEDDING_LENGTH * sizeof(__nv_bfloat16),
+               cudaMemcpyDeviceToDevice);
+    for (int layer = 0; layer < N_LAYERS; ++layer)
+    {
+
+        rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], prompt_len);
+
+        // Q = inputs * wq^T; my matrices are row-major, cublas expects column-major
+        // it perceives my matrices as transposed
+        // there's a trick where C = A * B == C^T = B^T * A^T
+        // so in my scenario cublas sees now: Q = inputs^T * wq^T^T = inputs ^T * wq
+        // so I need to do: Q^T = wq ^T * inputs
+        // the beauty is that we don't need to transpose Q^T back to Q
+        // because cublas sees the output as column-major
+        // so it's in fact transposed
+        // final dim (num_tok, EMBEDDING_LENGTH)
+        q_proj = buf_2048_1;
+        cublasStatus_t q_proj_status = cublasGemmEx(cublas_handle,
+                                                    CUBLAS_OP_T,
+                                                    CUBLAS_OP_N,
+                                                    EMBEDDING_LENGTH,
+                                                    prompt_len,
+                                                    EMBEDDING_LENGTH,
+                                                    &q_proj_alpha,
+                                                    weights.w_q[layer],
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    rms_norms,
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    &q_proj_beta,
+                                                    q_proj,
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    CUBLAS_COMPUTE_32F,
+                                                    CUBLAS_GEMM_DEFAULT);
+
+        // input = (num_tokens, EMBEDDING_LENGTH), weights = (KV_DIM, EMBEDDING_LENGTH)
+        // after trick: (KV_DIM, EMBEDDING_LENGTH) * (EMBEDDING_LENGTH, num_tokens) -> (KV_DIM, num_tokens), which really is (num_tok, KV_DIM)
+        // lda: EMBEDDING_LENGTH, ldb: EMBEDDING_LENGTH, ldc: KV_DIM
+        cublasStatus_t k_proj_status = cublasGemmEx(cublas_handle,
+                                                    CUBLAS_OP_T,
+                                                    CUBLAS_OP_N,
+                                                    KV_DIM,
+                                                    prompt_len,
+                                                    EMBEDDING_LENGTH,
+                                                    &k_proj_alpha,
+                                                    weights.w_k[layer],
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    rms_norms,
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    &k_proj_beta,
+                                                    k_proj[slot][layer],
+                                                    CUDA_R_16BF,
+                                                    KV_DIM,
+                                                    CUBLAS_COMPUTE_32F,
+                                                    CUBLAS_GEMM_DEFAULT);
+
+        // same as K projection
+        cublasStatus_t v_proj_status = cublasGemmEx(cublas_handle,
+                                                    CUBLAS_OP_T,
+                                                    CUBLAS_OP_N,
+                                                    KV_DIM,
+                                                    prompt_len,
+                                                    EMBEDDING_LENGTH,
+                                                    &v_proj_alpha,
+                                                    weights.w_v[layer],
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    rms_norms,
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    &v_proj_beta,
+                                                    v_proj[slot][layer],
+                                                    CUDA_R_16BF,
+                                                    KV_DIM,
+                                                    CUBLAS_COMPUTE_32F,
+                                                    CUBLAS_GEMM_DEFAULT);
+
+        // RoPE now
+
+        rope(q_proj, prompt_len, EMBEDDING_LENGTH);
+        rope(k_proj[slot][layer], prompt_len, KV_DIM);
+
+        // attention scores
+        // per head, 64 elements each
+        // so total 32 heads
+        // Q (num_tok, 2048)
+        // K (num_tok, 512)
+        // GQA grouping reuses 1 K head per 4 consecutive Q heads
+        // Q_head (num_tok, 64)
+        // K_head (num_tok, 64)
+        // attn_score_head = Q_head * K_head^T / sqrt(64)
+        // so: head output dims (num_tok, num_tok)
+        // total output (32, num_tok, num_tok)
+        for (int i = 0; i < NUM_Q_HEADS; ++i)
+        {
+            int k_head_idx = i / GQA_Q_TO_K_RATIO;
+            __nv_bfloat16 *q_head = q_proj + i * HEAD_DIM;
+            __nv_bfloat16 *k_head = k_proj[slot][layer] + k_head_idx * HEAD_DIM;
+            __nv_bfloat16 *attn_score_head = prefill_attn_scores + prompt_len * prompt_len * i;
+
+            cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
+                                                            CUBLAS_OP_T,
+                                                            CUBLAS_OP_N,
+                                                            prompt_len,
+                                                            prompt_len,
+                                                            HEAD_DIM,
+                                                            &attn_alpha,
+                                                            k_head,
+                                                            CUDA_R_16BF,
+                                                            KV_DIM,
+                                                            q_head,
+                                                            CUDA_R_16BF,
+                                                            EMBEDDING_LENGTH,
+                                                            &attn_beta,
+                                                            attn_score_head,
+                                                            CUDA_R_16BF,
+                                                            prompt_len,
+                                                            CUBLAS_COMPUTE_32F,
+                                                            CUBLAS_GEMM_DEFAULT);
+        }
+
+        causalMask(prefill_attn_scores, prompt_len);
+
+        softmax(prefill_attn_scores, prompt_len);
+
+        // attn scores * V
+        // (32, num_tok, num_tok) * (num_tok, 512)
+        // GQA - 4 Q heads share 1 V head
+        // attn_scores dim (32, num_tok, num_tok)
+        // attn_scores head dim (num_tok, num_tok)
+        // V dim (num_tok, 512)
+        // NUM_V_HEADS is 8 -> 512 / 8 = 64
+        // V_head dim (num_tok, 64)
+        // output head dim: scores head * V head -> (num_tok, num_tok) * (num_tok, 64) = (num_tok, 64)
+        // in total 32 output heads: so (num_tok, 64 * 32) = (num_tok, 2048)
+        attn_scores_v = buf_2048_1;
+        for (int i = 0; i < NUM_Q_HEADS; ++i)
+        {
+            int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
+            // i * prompt_under_prefill.size() * prompt_under_prefill.size(),  because attn scores is (32, num_tok, num_tok)
+            __nv_bfloat16 *attn_scores_head = prefill_attn_scores + i * prompt_len * prompt_len;
+            __nv_bfloat16 *v_head = v_proj[slot][layer] + v_head_idx * HEAD_DIM;
+            __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
+
+            cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
+                                                            CUBLAS_OP_N,
+                                                            CUBLAS_OP_N,
+                                                            HEAD_DIM,
+                                                            prompt_len,
+                                                            prompt_len,
+                                                            &attn_scores_v_alpha,
+                                                            v_head,
+                                                            CUDA_R_16BF,
+                                                            KV_DIM,
+                                                            attn_scores_head,
+                                                            CUDA_R_16BF,
+                                                            prompt_len,
+                                                            &attn_scores_v_beta,
+                                                            output_attn_scores_head,
+                                                            CUDA_R_16BF,
+                                                            EMBEDDING_LENGTH,
+                                                            CUBLAS_COMPUTE_32F,
+                                                            CUBLAS_GEMM_DEFAULT);
+        }
+
+        // output projection, it will be an input for MLP blocks
+        // attn_scores_v * w_o^T
+        // (num_tok, 2048) * (2048, 2048) -> (num_tok, 2048)
+        // same as Q projection, so copy paste
+        o_proj = buf_2048_2;
+        cublasStatus_t o_proj_status = cublasGemmEx(cublas_handle,
+                                                    CUBLAS_OP_T,
+                                                    CUBLAS_OP_N,
+                                                    EMBEDDING_LENGTH,
+                                                    prompt_len,
+                                                    EMBEDDING_LENGTH,
+                                                    &o_proj_alpha,
+                                                    weights.w_o[layer],
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    attn_scores_v,
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    &o_proj_beta,
+                                                    o_proj,
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    CUBLAS_COMPUTE_32F,
+                                                    CUBLAS_GEMM_DEFAULT);
+
+        // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
+        residualAdd(hidden_state, o_proj, prompt_len);
+        // post attention RMS Norm
+        rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], prompt_len);
+
+        // SwiGLU time - just MLP + SiLU
+        // gate = hidden_state (rms-normed) * mlp_gate_proj ^ T
+        // HIDDEN_DIM = 8192
+        // (num_tok, 2048) * (2048, 8192) -> (num_tok, 8192)
+        // my data is row major so transpose trick
+        // gate ^T = (mlp_gate_proj ^ T)^T * hidden_state^T
+        // gate ^T = mlp_gate_proj * hidden_state^T
+        // (num_tok, 8192)^T = (8192, 2048) * (2048, num_tok)
+        // but data is perceived as column major so I need to transpose mlp_gate_proj
+        // to make it work
+        // m 8192 n num_tok k 2048 lda 2048 ldb 2048 ldc 8192
+        cublasStatus_t gate_status = cublasGemmEx(cublas_handle,
+                                                  CUBLAS_OP_T,
+                                                  CUBLAS_OP_N,
+                                                  HIDDEN_DIM,
+                                                  prompt_len,
+                                                  EMBEDDING_LENGTH,
+                                                  &gate_alpha,
+                                                  weights.mlp_gate_proj[layer],
+                                                  CUDA_R_16BF,
+                                                  EMBEDDING_LENGTH,
+                                                  rms_norms,
+                                                  CUDA_R_16BF,
+                                                  EMBEDDING_LENGTH,
+                                                  &gate_beta,
+                                                  gate,
+                                                  CUDA_R_16BF,
+                                                  HIDDEN_DIM,
+                                                  CUBLAS_COMPUTE_32F,
+                                                  CUBLAS_GEMM_DEFAULT);
+
+        // up, the same dims as gate
+        cublasStatus_t up_status = cublasGemmEx(cublas_handle,
+                                                CUBLAS_OP_T,
+                                                CUBLAS_OP_N,
+                                                HIDDEN_DIM,
+                                                prompt_len,
+                                                EMBEDDING_LENGTH,
+                                                &up_alpha,
+                                                weights.mlp_up_proj[layer],
+                                                CUDA_R_16BF,
+                                                EMBEDDING_LENGTH,
+                                                rms_norms,
+                                                CUDA_R_16BF,
+                                                EMBEDDING_LENGTH,
+                                                &up_beta,
+                                                up,
+                                                CUDA_R_16BF,
+                                                HIDDEN_DIM,
+                                                CUBLAS_COMPUTE_32F,
+                                                CUBLAS_GEMM_DEFAULT);
+
+        // SiLU
+        // after_silu = SiLU(gate) * up (element-wise multication)
+        // after_silu = gate * (1 / (1 + e^(-gate))) * up
+        // gate is dim (num_tok, 8192), up too
+        silu(gate, up, prompt_len); // gate = after_silu now
+
+        // down projection
+        // output = post-silu * down_proj^T
+        // dims: (num_tok, 8192) * (2048, 8192) ^ T = (num_tok, 8192) * (8192, 2048) = (num_tok, 2048)
+        // output^T = (down_proj^T)^T * post-silu^T
+        // output^T = down_proj * post-silu^T
+        // cublas sees them already as transposed so only down_proj I need to transpose
+        // dims = (2048, 8192) * (8192, num_tok) = (2048, num_tok)
+        // m: 2048 n: num_tok, k: 8192
+        // lda: 8192, ldb: 8192, ldc: 2048
+        down = buf_2048_2;
+        cublasStatus_t down_status = cublasGemmEx(cublas_handle,
+                                                  CUBLAS_OP_T,
+                                                  CUBLAS_OP_N,
+                                                  EMBEDDING_LENGTH,
+                                                  prompt_len,
+                                                  HIDDEN_DIM,
+                                                  &down_alpha,
+                                                  weights.mlp_down_proj[layer],
+                                                  CUDA_R_16BF,
+                                                  HIDDEN_DIM,
+                                                  gate,
+                                                  CUDA_R_16BF,
+                                                  HIDDEN_DIM,
+                                                  &down_beta,
+                                                  down,
+                                                  CUDA_R_16BF,
+                                                  EMBEDDING_LENGTH,
+                                                  CUBLAS_COMPUTE_32F,
+                                                  CUBLAS_GEMM_DEFAULT);
+
+        // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
+        residualAdd(hidden_state, down, prompt_len);
+    }
+    rmsNorm(hidden_state, rms_norms, weights.norm, prompt_len);
+
+    // logits = rms_norms * weights.embed_tokens^T
+    // dim rms_norms: (num_tok, 2048), dim embed_tokens: (128256, 2048)
+    // logits dim = (num_tok, 2048) * (2048, 128256) = (num_tok, 128256) => m = num_tok, n = 128256, k = 2048
+    // I leave this comment above because it shows a bug in my thinking
+    // because I use the cublas trick, logits are transposed so m and n should be swapped
+    // so m 128256, n num_tok
+    // data is row major so we treat it as transposed and use the trick
+    // logits^T = ((weights.embed_tokens^T)^T * rms_norms^T
+    // logits^T = weights.embed_tokens * rms_norms^T
+    // so we need to transpose embed_tokens, because rms_norms already
+    // appears to cublas as transposed
+    // lda = 2048, ldb = 2048, ldc = 128256
+
+    cublasStatus_t embed_status = cublasGemmEx(cublas_handle,
+                                               CUBLAS_OP_T,
+                                               CUBLAS_OP_N,
+                                               VOCAB_SIZE,
+                                               prompt_len,
+                                               EMBEDDING_LENGTH,
+                                               &embed_alpha,
+                                               weights.embed_tokens,
+                                               CUDA_R_16BF,
+                                               EMBEDDING_LENGTH,
+                                               rms_norms,
+                                               CUDA_R_16BF,
+                                               EMBEDDING_LENGTH,
+                                               &embed_beta,
+                                               embed_proj,
+                                               CUDA_R_16BF,
+                                               VOCAB_SIZE,
+                                               CUBLAS_COMPUTE_32F,
+                                               CUBLAS_GEMM_DEFAULT);
+
+    cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * prompt_len * VOCAB_SIZE, cudaMemcpyDeviceToHost);
+    // argmax to get the output token
+    // TODO: write a proper kernel for it
+    // for now just a simple CPU function
+    int last_token_offset = (prompt_len - 1) * VOCAB_SIZE;
+    float max_token = (float)embed_proj_cpu[last_token_offset];
+    int max_token_idx = 0;
+    for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
+    {
+        if ((float)embed_proj_cpu[token_idx + last_token_offset] > max_token)
+        {
+            max_token = embed_proj_cpu[token_idx + last_token_offset];
+            max_token_idx = token_idx;
+        }
+    }
+    std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
+
+    generated_tokens[slot].push_back(max_token_idx);
+    last_generated_tokens[slot] = max_token_idx;
+    current_prompt_len[slot] = prompt_len;
+}
+
 int main(int argc, char *argv[])
 {
     cublasHandle_t cublas_handle;
@@ -268,362 +628,7 @@ int main(int argc, char *argv[])
         {
             continue; // slot taken, skip
         }
-        prompt = queue.front();
-        prompt_len = prompt.size();
-        queue.pop();
-        is_slot_free[slot] = false;
-
-        // TODO: prefill here, ending up with firs output token
-        cudaMemcpy(gpu_input_tokens, prompt.data(), prompt_len * sizeof(int), cudaMemcpyHostToDevice);
-        embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, prompt_len);
-
-        cudaMemcpy(hidden_state,
-                   input_embeddings,
-                   prompt_len * EMBEDDING_LENGTH * sizeof(__nv_bfloat16),
-                   cudaMemcpyDeviceToDevice);
-        for (int layer = 0; layer < N_LAYERS; ++layer)
-        {
-
-            rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], prompt_len);
-
-            // Q = inputs * wq^T; my matrices are row-major, cublas expects column-major
-            // it perceives my matrices as transposed
-            // there's a trick where C = A * B == C^T = B^T * A^T
-            // so in my scenario cublas sees now: Q = inputs^T * wq^T^T = inputs ^T * wq
-            // so I need to do: Q^T = wq ^T * inputs
-            // the beauty is that we don't need to transpose Q^T back to Q
-            // because cublas sees the output as column-major
-            // so it's in fact transposed
-            // final dim (num_tok, EMBEDDING_LENGTH)
-            q_proj = buf_2048_1;
-            cublasStatus_t q_proj_status = cublasGemmEx(cublas_handle,
-                                                        CUBLAS_OP_T,
-                                                        CUBLAS_OP_N,
-                                                        EMBEDDING_LENGTH,
-                                                        prompt_len,
-                                                        EMBEDDING_LENGTH,
-                                                        &q_proj_alpha,
-                                                        weights.w_q[layer],
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        rms_norms,
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        &q_proj_beta,
-                                                        q_proj,
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        CUBLAS_COMPUTE_32F,
-                                                        CUBLAS_GEMM_DEFAULT);
-
-            // input = (num_tokens, EMBEDDING_LENGTH), weights = (KV_DIM, EMBEDDING_LENGTH)
-            // after trick: (KV_DIM, EMBEDDING_LENGTH) * (EMBEDDING_LENGTH, num_tokens) -> (KV_DIM, num_tokens), which really is (num_tok, KV_DIM)
-            // lda: EMBEDDING_LENGTH, ldb: EMBEDDING_LENGTH, ldc: KV_DIM
-            cublasStatus_t k_proj_status = cublasGemmEx(cublas_handle,
-                                                        CUBLAS_OP_T,
-                                                        CUBLAS_OP_N,
-                                                        KV_DIM,
-                                                        prompt_len,
-                                                        EMBEDDING_LENGTH,
-                                                        &k_proj_alpha,
-                                                        weights.w_k[layer],
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        rms_norms,
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        &k_proj_beta,
-                                                        k_proj[slot][layer],
-                                                        CUDA_R_16BF,
-                                                        KV_DIM,
-                                                        CUBLAS_COMPUTE_32F,
-                                                        CUBLAS_GEMM_DEFAULT);
-
-            // same as K projection
-            cublasStatus_t v_proj_status = cublasGemmEx(cublas_handle,
-                                                        CUBLAS_OP_T,
-                                                        CUBLAS_OP_N,
-                                                        KV_DIM,
-                                                        prompt_len,
-                                                        EMBEDDING_LENGTH,
-                                                        &v_proj_alpha,
-                                                        weights.w_v[layer],
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        rms_norms,
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        &v_proj_beta,
-                                                        v_proj[slot][layer],
-                                                        CUDA_R_16BF,
-                                                        KV_DIM,
-                                                        CUBLAS_COMPUTE_32F,
-                                                        CUBLAS_GEMM_DEFAULT);
-
-            // RoPE now
-
-            rope(q_proj, prompt_len, EMBEDDING_LENGTH);
-            rope(k_proj[slot][layer], prompt_len, KV_DIM);
-
-            // attention scores
-            // per head, 64 elements each
-            // so total 32 heads
-            // Q (num_tok, 2048)
-            // K (num_tok, 512)
-            // GQA grouping reuses 1 K head per 4 consecutive Q heads
-            // Q_head (num_tok, 64)
-            // K_head (num_tok, 64)
-            // attn_score_head = Q_head * K_head^T / sqrt(64)
-            // so: head output dims (num_tok, num_tok)
-            // total output (32, num_tok, num_tok)
-            for (int i = 0; i < NUM_Q_HEADS; ++i)
-            {
-                int k_head_idx = i / GQA_Q_TO_K_RATIO;
-                __nv_bfloat16 *q_head = q_proj + i * HEAD_DIM;
-                __nv_bfloat16 *k_head = k_proj[slot][layer] + k_head_idx * HEAD_DIM;
-                __nv_bfloat16 *attn_score_head = prefill_attn_scores + prompt_len * prompt_len * i;
-
-                cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
-                                                                CUBLAS_OP_T,
-                                                                CUBLAS_OP_N,
-                                                                prompt_len,
-                                                                prompt_len,
-                                                                HEAD_DIM,
-                                                                &attn_alpha,
-                                                                k_head,
-                                                                CUDA_R_16BF,
-                                                                KV_DIM,
-                                                                q_head,
-                                                                CUDA_R_16BF,
-                                                                EMBEDDING_LENGTH,
-                                                                &attn_beta,
-                                                                attn_score_head,
-                                                                CUDA_R_16BF,
-                                                                prompt_len,
-                                                                CUBLAS_COMPUTE_32F,
-                                                                CUBLAS_GEMM_DEFAULT);
-            }
-
-            causalMask(prefill_attn_scores, prompt_len);
-
-            softmax(prefill_attn_scores, prompt_len);
-
-            // attn scores * V
-            // (32, num_tok, num_tok) * (num_tok, 512)
-            // GQA - 4 Q heads share 1 V head
-            // attn_scores dim (32, num_tok, num_tok)
-            // attn_scores head dim (num_tok, num_tok)
-            // V dim (num_tok, 512)
-            // NUM_V_HEADS is 8 -> 512 / 8 = 64
-            // V_head dim (num_tok, 64)
-            // output head dim: scores head * V head -> (num_tok, num_tok) * (num_tok, 64) = (num_tok, 64)
-            // in total 32 output heads: so (num_tok, 64 * 32) = (num_tok, 2048)
-            attn_scores_v = buf_2048_1;
-            for (int i = 0; i < NUM_Q_HEADS; ++i)
-            {
-                int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
-                // i * prompt_under_prefill.size() * prompt_under_prefill.size(),  because attn scores is (32, num_tok, num_tok)
-                __nv_bfloat16 *attn_scores_head = prefill_attn_scores + i * prompt_len * prompt_len;
-                __nv_bfloat16 *v_head = v_proj[slot][layer] + v_head_idx * HEAD_DIM;
-                __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
-
-                cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
-                                                                CUBLAS_OP_N,
-                                                                CUBLAS_OP_N,
-                                                                HEAD_DIM,
-                                                                prompt_len,
-                                                                prompt_len,
-                                                                &attn_scores_v_alpha,
-                                                                v_head,
-                                                                CUDA_R_16BF,
-                                                                KV_DIM,
-                                                                attn_scores_head,
-                                                                CUDA_R_16BF,
-                                                                prompt_len,
-                                                                &attn_scores_v_beta,
-                                                                output_attn_scores_head,
-                                                                CUDA_R_16BF,
-                                                                EMBEDDING_LENGTH,
-                                                                CUBLAS_COMPUTE_32F,
-                                                                CUBLAS_GEMM_DEFAULT);
-            }
-
-            // output projection, it will be an input for MLP blocks
-            // attn_scores_v * w_o^T
-            // (num_tok, 2048) * (2048, 2048) -> (num_tok, 2048)
-            // same as Q projection, so copy paste
-            o_proj = buf_2048_2;
-            cublasStatus_t o_proj_status = cublasGemmEx(cublas_handle,
-                                                        CUBLAS_OP_T,
-                                                        CUBLAS_OP_N,
-                                                        EMBEDDING_LENGTH,
-                                                        prompt_len,
-                                                        EMBEDDING_LENGTH,
-                                                        &o_proj_alpha,
-                                                        weights.w_o[layer],
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        attn_scores_v,
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        &o_proj_beta,
-                                                        o_proj,
-                                                        CUDA_R_16BF,
-                                                        EMBEDDING_LENGTH,
-                                                        CUBLAS_COMPUTE_32F,
-                                                        CUBLAS_GEMM_DEFAULT);
-
-            // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-            residualAdd(hidden_state, o_proj, prompt_len);
-            // post attention RMS Norm
-            rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], prompt_len);
-
-            // SwiGLU time - just MLP + SiLU
-            // gate = hidden_state (rms-normed) * mlp_gate_proj ^ T
-            // HIDDEN_DIM = 8192
-            // (num_tok, 2048) * (2048, 8192) -> (num_tok, 8192)
-            // my data is row major so transpose trick
-            // gate ^T = (mlp_gate_proj ^ T)^T * hidden_state^T
-            // gate ^T = mlp_gate_proj * hidden_state^T
-            // (num_tok, 8192)^T = (8192, 2048) * (2048, num_tok)
-            // but data is perceived as column major so I need to transpose mlp_gate_proj
-            // to make it work
-            // m 8192 n num_tok k 2048 lda 2048 ldb 2048 ldc 8192
-            cublasStatus_t gate_status = cublasGemmEx(cublas_handle,
-                                                      CUBLAS_OP_T,
-                                                      CUBLAS_OP_N,
-                                                      HIDDEN_DIM,
-                                                      prompt_len,
-                                                      EMBEDDING_LENGTH,
-                                                      &gate_alpha,
-                                                      weights.mlp_gate_proj[layer],
-                                                      CUDA_R_16BF,
-                                                      EMBEDDING_LENGTH,
-                                                      rms_norms,
-                                                      CUDA_R_16BF,
-                                                      EMBEDDING_LENGTH,
-                                                      &gate_beta,
-                                                      gate,
-                                                      CUDA_R_16BF,
-                                                      HIDDEN_DIM,
-                                                      CUBLAS_COMPUTE_32F,
-                                                      CUBLAS_GEMM_DEFAULT);
-
-            // up, the same dims as gate
-            cublasStatus_t up_status = cublasGemmEx(cublas_handle,
-                                                    CUBLAS_OP_T,
-                                                    CUBLAS_OP_N,
-                                                    HIDDEN_DIM,
-                                                    prompt_len,
-                                                    EMBEDDING_LENGTH,
-                                                    &up_alpha,
-                                                    weights.mlp_up_proj[layer],
-                                                    CUDA_R_16BF,
-                                                    EMBEDDING_LENGTH,
-                                                    rms_norms,
-                                                    CUDA_R_16BF,
-                                                    EMBEDDING_LENGTH,
-                                                    &up_beta,
-                                                    up,
-                                                    CUDA_R_16BF,
-                                                    HIDDEN_DIM,
-                                                    CUBLAS_COMPUTE_32F,
-                                                    CUBLAS_GEMM_DEFAULT);
-
-            // SiLU
-            // after_silu = SiLU(gate) * up (element-wise multication)
-            // after_silu = gate * (1 / (1 + e^(-gate))) * up
-            // gate is dim (num_tok, 8192), up too
-            silu(gate, up, prompt_len); // gate = after_silu now
-
-            // down projection
-            // output = post-silu * down_proj^T
-            // dims: (num_tok, 8192) * (2048, 8192) ^ T = (num_tok, 8192) * (8192, 2048) = (num_tok, 2048)
-            // output^T = (down_proj^T)^T * post-silu^T
-            // output^T = down_proj * post-silu^T
-            // cublas sees them already as transposed so only down_proj I need to transpose
-            // dims = (2048, 8192) * (8192, num_tok) = (2048, num_tok)
-            // m: 2048 n: num_tok, k: 8192
-            // lda: 8192, ldb: 8192, ldc: 2048
-            down = buf_2048_2;
-            cublasStatus_t down_status = cublasGemmEx(cublas_handle,
-                                                      CUBLAS_OP_T,
-                                                      CUBLAS_OP_N,
-                                                      EMBEDDING_LENGTH,
-                                                      prompt_len,
-                                                      HIDDEN_DIM,
-                                                      &down_alpha,
-                                                      weights.mlp_down_proj[layer],
-                                                      CUDA_R_16BF,
-                                                      HIDDEN_DIM,
-                                                      gate,
-                                                      CUDA_R_16BF,
-                                                      HIDDEN_DIM,
-                                                      &down_beta,
-                                                      down,
-                                                      CUDA_R_16BF,
-                                                      EMBEDDING_LENGTH,
-                                                      CUBLAS_COMPUTE_32F,
-                                                      CUBLAS_GEMM_DEFAULT);
-
-            // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-            residualAdd(hidden_state, down, prompt_len);
-        }
-        rmsNorm(hidden_state, rms_norms, weights.norm, prompt_len);
-
-        // logits = rms_norms * weights.embed_tokens^T
-        // dim rms_norms: (num_tok, 2048), dim embed_tokens: (128256, 2048)
-        // logits dim = (num_tok, 2048) * (2048, 128256) = (num_tok, 128256) => m = num_tok, n = 128256, k = 2048
-        // I leave this comment above because it shows a bug in my thinking
-        // because I use the cublas trick, logits are transposed so m and n should be swapped
-        // so m 128256, n num_tok
-        // data is row major so we treat it as transposed and use the trick
-        // logits^T = ((weights.embed_tokens^T)^T * rms_norms^T
-        // logits^T = weights.embed_tokens * rms_norms^T
-        // so we need to transpose embed_tokens, because rms_norms already
-        // appears to cublas as transposed
-        // lda = 2048, ldb = 2048, ldc = 128256
-
-        cublasStatus_t embed_status = cublasGemmEx(cublas_handle,
-                                                   CUBLAS_OP_T,
-                                                   CUBLAS_OP_N,
-                                                   VOCAB_SIZE,
-                                                   prompt_len,
-                                                   EMBEDDING_LENGTH,
-                                                   &embed_alpha,
-                                                   weights.embed_tokens,
-                                                   CUDA_R_16BF,
-                                                   EMBEDDING_LENGTH,
-                                                   rms_norms,
-                                                   CUDA_R_16BF,
-                                                   EMBEDDING_LENGTH,
-                                                   &embed_beta,
-                                                   embed_proj,
-                                                   CUDA_R_16BF,
-                                                   VOCAB_SIZE,
-                                                   CUBLAS_COMPUTE_32F,
-                                                   CUBLAS_GEMM_DEFAULT);
-
-        cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * prompt_len * VOCAB_SIZE, cudaMemcpyDeviceToHost);
-        // argmax to get the output token
-        // TODO: write a proper kernel for it
-        // for now just a simple CPU function
-        int last_token_offset = (prompt_len - 1) * VOCAB_SIZE;
-        float max_token = (float)embed_proj_cpu[last_token_offset];
-        int max_token_idx = 0;
-        for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
-        {
-            if ((float)embed_proj_cpu[token_idx + last_token_offset] > max_token)
-            {
-                max_token = embed_proj_cpu[token_idx + last_token_offset];
-                max_token_idx = token_idx;
-            }
-        }
-        std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
-
-        generated_tokens[slot].push_back(max_token_idx);
-        last_generated_tokens[slot] = max_token_idx;
-        current_prompt_len[slot] = prompt_len;
+        prefill(prompt, queue, prompt_len, is_slot_free, slot, gpu_input_tokens, input_embeddings, weights, hidden_state, rms_norms, q_proj, buf_2048_1, cublas_handle, q_proj_alpha, q_proj_beta, k_proj_alpha, k_proj_beta, k_proj, v_proj_alpha, v_proj_beta, v_proj, prefill_attn_scores, attn_alpha, attn_beta, attn_scores_v, attn_scores_v_alpha, attn_scores_v_beta, o_proj, buf_2048_2, o_proj_alpha, o_proj_beta, gate_alpha, gate_beta, gate, up_alpha, up_beta, up, down, down_alpha, down_beta, embed_alpha, embed_beta, embed_proj, embed_proj_cpu, generated_tokens, last_generated_tokens, current_prompt_len);
 
         // // after prefill:
         // int first_token = -1; // TODO just a stub
@@ -650,8 +655,12 @@ int main(int argc, char *argv[])
         {
             if (is_slot_free[slot])
             {
-                // TODO: try to get an item from queue and decode?
-                continue;
+                if (queue.empty())
+                {
+                    continue;
+                }
+
+                prefill(prompt, queue, prompt_len, is_slot_free, slot, gpu_input_tokens, input_embeddings, weights, hidden_state, rms_norms, q_proj, buf_2048_1, cublas_handle, q_proj_alpha, q_proj_beta, k_proj_alpha, k_proj_beta, k_proj, v_proj_alpha, v_proj_beta, v_proj, prefill_attn_scores, attn_alpha, attn_beta, attn_scores_v, attn_scores_v_alpha, attn_scores_v_beta, o_proj, buf_2048_2, o_proj_alpha, o_proj_beta, gate_alpha, gate_beta, gate, up_alpha, up_beta, up, down, down_alpha, down_beta, embed_alpha, embed_beta, embed_proj, embed_proj_cpu, generated_tokens, last_generated_tokens, current_prompt_len);
             }
             active_slots.push_back(slot);
             active_tokens.push_back(last_generated_tokens[slot]);

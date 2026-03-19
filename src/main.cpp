@@ -165,7 +165,6 @@ void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int 
                cudaMemcpyDeviceToDevice);
     for (int layer = 0; layer < N_LAYERS; ++layer)
     {
-
         rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], prompt_len);
 
         // Q = inputs * wq^T; my matrices are row-major, cublas expects column-major
@@ -242,8 +241,12 @@ void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int 
                                                     CUBLAS_COMPUTE_32F,
                                                     CUBLAS_GEMM_DEFAULT);
 
-        // PagedAttention
-        // scatter into blocks
+        // RoPE now
+
+        rope(q_proj, prompt_len, EMBEDDING_LENGTH);
+        rope(k_proj_temp_buf, prompt_len, KV_DIM);
+
+        // PagedAttention - scatter K and V into blocks
         // slot - index within batch
         // layer - index of layer
         // ceil(prompt_len/BLOCK_SIZE) = number of blocks needed to allocate in block table
@@ -285,12 +288,6 @@ void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int 
             __nv_bfloat16 *v_proj_ptr = v_proj_temp_buf + token_idx * KV_DIM;
             cudaMemcpy(v_cache_ptr, v_proj_ptr, num_tokens_to_copy * KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
         }
-        // int *dst_ptr = block_table_gpu + slot * N_LAYERS + token_idx;
-
-        // RoPE now
-
-        rope(q_proj, prompt_len, EMBEDDING_LENGTH);
-        rope(k_proj[slot][layer], prompt_len, KV_DIM);
 
         // attention scores
         // per head, 64 elements each
@@ -307,7 +304,7 @@ void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int 
         {
             int k_head_idx = i / GQA_Q_TO_K_RATIO;
             __nv_bfloat16 *q_head = q_proj + i * HEAD_DIM;
-            __nv_bfloat16 *k_head = k_proj[slot][layer] + k_head_idx * HEAD_DIM;
+            __nv_bfloat16 *k_head = k_proj_temp_buf + k_head_idx * HEAD_DIM;
             __nv_bfloat16 *attn_score_head = prefill_attn_scores + prompt_len * prompt_len * i;
 
             cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
@@ -351,7 +348,7 @@ void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int 
             int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
             // i * prompt_under_prefill.size() * prompt_under_prefill.size(),  because attn scores is (32, num_tok, num_tok)
             __nv_bfloat16 *attn_scores_head = prefill_attn_scores + i * prompt_len * prompt_len;
-            __nv_bfloat16 *v_head = v_proj[slot][layer] + v_head_idx * HEAD_DIM;
+            __nv_bfloat16 *v_head = v_proj_temp_buf + v_head_idx * HEAD_DIM;
             __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
 
             cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,

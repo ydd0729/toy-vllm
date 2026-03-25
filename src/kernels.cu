@@ -396,6 +396,7 @@ void softmaxDecode(__nv_bfloat16 *input, int seq_len)
 // inside a single particular thread that processes a single position of particular Q head for a particular sequence, for particular layer
 __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots)
 {
+    __shared__ float dot_products[2];
     int active_slot = blockIdx.x; // active_slot == seq_id
     int slot = gpu_active_slots[active_slot];
     int q_head_id = blockIdx.y;
@@ -412,6 +413,27 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
         {
             __nv_bfloat16 *k = (__nv_bfloat16 *)((char *)kv_cache + physical_block * BLOCK_BYTES + token * KV_DIM * sizeof(__nv_bfloat16) + kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
             float qk = (float)q * (float)*k;
+            // tree reduction within current warp, thread 0 gets sum of all 32 elements within warp
+            // could be done with __syncthreads but accessing memory of other threads in warp is op
+            qk += __shfl_down_sync(0xffffffff, qk, 16);
+            qk += __shfl_down_sync(0xffffffff, qk, 8);
+            qk += __shfl_down_sync(0xffffffff, qk, 4);
+            qk += __shfl_down_sync(0xffffffff, qk, 2);
+            qk += __shfl_down_sync(0xffffffff, qk, 1);
+            if (thread_id == 0)
+            {
+                dot_products[0] = qk;
+            }
+            if (thread_id == 32)
+            {
+                dot_products[1] = qk;
+            }
+            __syncthreads();
+            if (thread_id == 0)
+            {
+                dot_products[0] += dot_products[1];
+            }
+            __syncthreads();
         }
     }
 }

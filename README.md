@@ -10,7 +10,7 @@ Model Serving with PagedAttention](https://arxiv.org/pdf/2309.06180)
 - [x] KV cache
 - [x] static batching
 - [x] continuous batching 
-- [ ] PagedAttention (in progress)
+- [x] PagedAttention
 
 External libraries:
 

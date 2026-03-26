@@ -15,7 +15,8 @@ We will learn a lot along the way, make mistakes and derive the ideas and maths 
 
 Make yourself a hot beverage and let's begin
 
-# The source code is finished, the course is in progress. ETA - end of April 2026
+
+# The course below is in progress. ETA end of April 2026
 
 ## LLM, vLLM, models, servers, inference servers, ???
 
@@ -31,30 +32,6 @@ The process of going from 0 to LLM writing a text is like this:
 3. **Serve the model (we are here)** - The file with weights can't be ran on a computer. It's not an executable. It's a lot of numbers. The architecture can't be ran either - it's just a plan, a blueprint, a description of computation. To actually run the model, we need a program that turns the architecture and its operations into executable code and uses file with model weights to load the weights into the architecture. Once you write a program that implements the operations and once the program loads the weights (weights are loaded in the runtime of the program, at the startup), you can finally send prompts to the model and get meaningful response
 
 > The training phase of an LLM is something we don't do in this course. We take a trained LLM and write a program which will run this LLM fast on NVIDIA GPU for multiple requests in parallel. If you want to train your own LLM, I strongly recommend sensei Karpathy repositories like [nanoGPT](https://github.com/karpathy/nanoGPT) and [llm.c](https://github.com/karpathy/llm.c) and his [YouTube channel](https://www.youtube.com/@AndrejKarpathy). Similarly, we don't design the model, but the tensor libraries are also fascinating topic and worth understanding from scratch. Geohot's [tinygrad](https://github.com/tinygrad/tinygrad) is a project which 
-
-
-I build the project based on the vLLM paper [Efficient Memory Management for Large Language Model Serving with PagedAttention](https://arxiv.org/pdf/2309.06180)
-
-External libraries:
-
-- cuBLAS for GEMMs for projections
-- tokenizer from HuggingFace Transformers
-
-Main design choices:
-- Test on Llama 3.2 1B Instruct
-- BF16 (because Llama 3.2 1B uses it)
-- Single GPU (tested on RTX 5090 32GB)
-
-### use
-for development
-
-```sh
-./full-test.sh
-```
-
-```sh
-python python/tokenizer.py "The capital of France is" | ./tiny-vllm
-```
 
 ### model architecture
 ```py
@@ -85,9 +62,5 @@ LlamaForCausalLM(
   (lm_head): Linear(in_features=2048, out_features=128256, bias=False)
 )
 ```
-
-### useful links
-- "From Online Softmax to FlashAttention" by Zihao Ye https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
-- vLLM paper https://arxiv.org/pdf/2309.06180
 
 Jędrzej Maczan, 2026, Apache License 2.0

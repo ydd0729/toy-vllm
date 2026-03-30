@@ -86,9 +86,9 @@ You face the first design decision now. Do you want to make your inference serve
 
 Whatever you decide, it's always easier to develop on a single model and then generalize, than try to make it flexible from the beginning when you're not sure how the code will look like at the end. You can always get back to it and update when you choose to.
 
-If you want to make your server model-independent, you need to allocate the memory, set the model data shape and type dynamically based on Safetensors header and implement more operations, making sure to cover all operations used by all models that you want to support. Probably you would still need to provide some blueprints of the models architecture, because the Safetensors file doesn't tell you which operation to run with this data, in what order etc. I'm not sure what's the optimal approach to do that, but if you figure it out, either on your own or by reading through vLLM/[TensorRT](https://github.com/NVIDIA/TensorRT)/others code, feel invited to share your findings
+If you want to make your server model-independent, you need to allocate the memory, set the model data `shape` and type (`dtype`) dynamically based on Safetensors header and implement more operations, making sure to cover all operations used by all models that you want to support. Probably you would still need to provide some blueprints of the models architecture, because the Safetensors file doesn't tell you which operation to run with this data, in what order etc. I'm not sure what's the optimal approach to do that, but if you figure it out, either on your own or by reading through vLLM/[TensorRT](https://github.com/NVIDIA/TensorRT)/others code, feel invited to share your findings
 
-I will assume that we just code our server for Llama 3.2 1B Instruct architecture. Here's a dump of [Hugging Face Transformers](https://huggingface.co/docs/transformers/index), with this model loaded, so we can inspect what operations we need to implement and what data shape and data types we need to use:
+I will assume that we just code our server for Llama 3.2 1B Instruct architecture. Here's a dump of [Hugging Face Transformers](https://huggingface.co/docs/transformers/index) `LlamaForCausalLM` object with `meta-llama/Llama-3.2-1B-Instruct` model loaded. We can inspect which operations we need to implement and what data shape and data types we need to use:
 
 ```py
 LlamaForCausalLM(
@@ -121,9 +121,11 @@ LlamaForCausalLM(
 
 Let's dissect it.
 
-First of all, we don't really learn neither the order of operations or data type here. But [model card](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) on Hugging Face page tell us that weights are in [BF16](https://en.wikipedia.org/wiki/Bfloat16_floating-point_format) format. We will go back to the format soon. We need to understand the order of operations to know how to code it. Sebastian Raschka has a gallery of LLM architectures and it shows nicely how the operations are organized - see [here (the left one)](https://magazine.sebastianraschka.com/i/168650848/61-qwen3-dense).
+First of all, we don't really know neither the order of operations or data type from this. But! [Model card](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) on Hugging Face page tell us that weights are in [BF16](https://en.wikipedia.org/wiki/Bfloat16_floating-point_format) format. We will go back to the format soon. 
 
-So the flow is like this:
+We need to understand the order of operations to know how to code it. Sebastian Raschka has a gallery of LLM architectures and it shows nicely how the operations are organized - see [here (the left one)](https://magazine.sebastianraschka.com/i/168650848/61-qwen3-dense).
+
+By looking at the diagram from Sebastian, we see that the operations order in LLama 3.2 1B is like this:
 1. Send some text to the model
 2. Turn it into tokens (a new concept, we didn't mention it yet)
 3. Retrieve an embedding for each token
@@ -157,9 +159,11 @@ So the flow is like this:
 
 After these steps, we should get our first token produced by the language model ran on our server.
 
-## BF16 vs FP16
+No worries if some of this operations are not familiar yet. You will understand them viscerally once we progress through the course. I don't remember how they work either and often need to look up again, so don't feel bad for going back and forth or looking things up with a chatbot or internet search.
 
-Incoming!
+## How BF16 works
+
+Let's remind ourselves about what we want to achieve. We want to load a model. We already know the structure of the file with a model, a Safetensors file. We know our reference model architecture. We checked that model weights are stored in BF16 type. Let's take a moment to think about this type
 
 ## Working with GPU memory
 

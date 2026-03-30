@@ -58,7 +58,7 @@ The exact setup on which I develop and test it:
 - The only external dependency you will pull in is JSON parser [nlohmann/json](https://github.com/nlohmann/json) 3.12.0, which is a single header file [include/json.hpp](include/json.hpp)
 - AMD CPU (Ryzen 7 9800X3D)
 - NVIDIA GPU (RTX 5090)
-- I used [Llama 3.2 1B Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) from Hugging Face (commit hash 898999bd25b40516fce5a5b8f0948f4c81c650bc)
+- I used [Llama 3.2 1B Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) from Hugging Face (commit hash 898999bd25b40516fce5a5b8f0948f4c81c650bc), you need just `model.safetensors` file from this repository
 
 Install the dependencies and run the program with `./test.sh` - it will build it and immediately execute it
 
@@ -159,11 +159,27 @@ By looking at the diagram from Sebastian, we see that the operations order in LL
 
 After these steps, we should get our first token produced by the language model ran on our server.
 
-No worries if some of this operations are not familiar yet. You will understand them viscerally once we progress through the course. I don't remember how they work either and often need to look up again, so don't feel bad for going back and forth or looking things up with a chatbot or internet search.
+Don't worry if some of this operations are not familiar yet. You will understand them viscerally once we progress through the course. I keep forgetting how they work, too, and often need to look up again, so don't feel bad for going back and forth or looking things up with a chatbot or internet search.
 
-## How BF16 works
+## How bfloat16 works
 
-Let's remind ourselves about what we want to achieve. We want to load a model. We already know the structure of the file with a model, a Safetensors file. We know our reference model architecture. We checked that model weights are stored in BF16 type. Let's take a moment to think about this type
+Let's remind ourselves about what we want to achieve. We want to load a model. We already know the structure of the file with a model, a Safetensors file. We know our reference model architecture. We checked that model weights are stored in BF16 type. Let's take a moment to think about this type and floating-point numbers in general
+
+Everything on the computer is binary, at the very end. [Computer numbers formats, too](https://en.wikipedia.org/wiki/Computer_number_format).
+
+In ML models, weights are almost never integer numbers. They are rather real numbers. And computers are binary. It means that people had to figure out how to represent real numbers in programming languages, in a way that is memory efficient. In this context, it means that you can pack a lot of information in small amount of bits. Because of course, you can build a complex data type ("complex" like in "non-trivial", not like in "real+imaginary"), where the part to the left from a dot separator is stored as an integer and the part after a separator (so the less than 1 part) is stored as another integer. But you can see how inefficient is that. It's only useful for situations when you really need full precision. And this is why things like [decimal in Python](https://docs.python.org/3/library/decimal.html) exist.
+
+Ok, so now let's think what could we do instead. The simplest alternative would be to take an integer number, like 1234 and say "I will put a dot between 12 and 34", so you'd get 12.34. People solved this with a scaling factor, like literally, for 1234 you'd use scaling factor 1/100 to get 12.34. You still need to figure out how to represent it on the computer. In this format, the fractional part (after the dot) has always fixed length. This format is called [fixed-point numbers](https://en.wikipedia.org/wiki/Fixed-point_arithmetic). It's less widely used, but I didn't dig deep enough to tell you why
+
+So if there are fixed-point numbers, there inevitably need to be non-fixed-point numbers. Let's just think about it, loosely. Non-fixed-point could mean that the dot (the point) can move around. The fractional part can be longer or shorter. Sounds like more memory efficient solution.
+
+< In progress here >
+
+If you want to test your understanding, Wikipedia page about half-precision floating-point formats has [lots of good examples](https://en.wikipedia.org/wiki/Half-precision_floating-point_format#Half_precision_examples)
+
+Now you have all prerequisities to load a model in your inference engine and start doing interesing things. Would like to read some hands-on primer on working with GPU memory in CUDA? Keep reading the next section or skip to the inference part.
+
+Oh btw, 32-bit floats are called single-precision floats. And then you hear about double-precision. And you might be like - omg so I get TWO floating points within the same number, then? Unfortunately the double precision just means that the number is bigger (64-bit). Meh
 
 ## Working with GPU memory
 
@@ -182,19 +198,33 @@ Incoming!
 Incoming!
 
 ## Attention
+
 Incoming!
+
 ## RoPE
+
 Incoming!
+
 ## SiLU
+
 Incoming!
+
 ## Residual connections
+
 Incoming!
+
 ## Causal mask
+
 Incoming!
+
 ## RMS Norm
+
 Incoming!
+
 ## Argmax
+
 Incoming!
+
 ## cublasGemmEx
 
 Incoming!

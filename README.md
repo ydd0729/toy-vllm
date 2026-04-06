@@ -29,7 +29,7 @@ After I finish text, I want to draw and add illustrations
 - [Technical prerequisities](#technical-prerequisities)
 - [Safetensors and your model](#safetensors-and-your-model)
 - [How floating-point numbers work and why we use bfloat16](#how-floating-point-numbers-work-and-why-we-use-bfloat16)
-- [Working with GPU memory](#working-with-gpu-memory)
+- [GPU and CPU memory](#gpu-and-cpu-memory)
 - [Single token inference](#single-token-inference)
 - [Prefill vs decode](#prefill-vs-decode)
 - [GQA](#gqa)
@@ -308,9 +308,25 @@ Now you have all prerequisities to load a model in your inference engine and sta
 
 Oh btw, 32-bit floats are called single-precision floats. And then you hear about double-precision. And you might be like - omg so I get TWO floating points within the same number, then? Unfortunately the double precision just means that the number is bigger (64-bit). Meh
 
-## Working with GPU memory
+## GPU and CPU memory
 
-Incoming!
+This chapter might be a bit random, but I hope it's useful if you still begin with GPU programming. Data can live in host or device. 
+
+Host is your PC with CPU. It has slow, big memory - DRAM - the one you buy and plugin into a motherboard. Recently very price'y, because of big tech AI craze. DRAM is separate from CPU. CPU has also it's own, small and fast on-chip memory - SRAM (I will wait until you stop laughing, if you're Slavic). 
+
+Device is your GPU. It also has slow, big memory - HBM, VRAM - but it's soldered to the card and you can extend it easily, as you do with DRAM in your PC. It has small, fast memory - SRAM - which you can use if you defined `__shared__` variables.
+
+GPU can't access your DRAM, so before running any computation on GPU, you need to copy data to it. The typical flow can be like this:
+
+1. Create a variable on CPU
+2. Write to variable on CPU
+3. Compute the size of memory taken by the variable on CPU
+4. Multiply the computed size by the size of variable type
+5. Allocate the memory on GPU
+6. Copy the variable from CPU to GPU
+7. You can use this data in your GPU computations now
+
+Ideally you want to allocate as little memory as possible, reuse this memory as much as possible and copy data as rarely as possible.
 
 ## Single token inference
 

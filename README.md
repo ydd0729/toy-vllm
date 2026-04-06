@@ -300,7 +300,7 @@ Let's plug all of them into the formula together: $1 * 8 * 1.5419921875 = 12.335
 
 But this was float16. And our reference model (Llama 3.2 1B Instruct) used bfloat16 (BF16). It turns out bfloat16 is widely used in many different models. It also takes 16 bits, but it's exponent is longer (8 bits) than regular float16 (5 bits). First interesting thing about bfloat16 is that the size of exponent is actually the same as of twice bigger 32-bit float (float32, FP32, float), which also has 8 bit exponent. So comparing with float16, bfloat16 trades 3 bits of fraction to gain 3 bits of exponent. So naturally, the fraction shrinks and it's only 7 bits now. So to sum up - bfloat16 is 1 sign bit, 8 bit sign exponent and 7 bit fraction.
 
-Why bfloat16 matters? < TODO >
+Why bfloat16 matters? It has the same size as float16 (a half size of a full precision float), and at the same time it has the same exponent as the float32 - at the cost of smaller fraction. The industry often chooses it for inference, because it's less likely to have range issues ([overflow](https://en.wikipedia.org/wiki/Integer_overflow) / [underflow](https://en.wikipedia.org/wiki/Arithmetic_underflow)) and at the same time the loss of precision (due to smaller fraction) is an acceptable tradeoff in LLM inference (empirical results shows it).
 
 If you want to test your understanding, Wikipedia page about half-precision floating-point formats has [lots of good examples](https://en.wikipedia.org/wiki/Half-precision_floating-point_format#Half_precision_examples)
 

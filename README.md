@@ -32,6 +32,7 @@ After I finish text, I want to draw and add illustrations
 - [GPU and CPU memory](#gpu-and-cpu-memory)
 - [Single token inference](#single-token-inference)
 - [Prefill vs decode](#prefill-vs-decode)
+- [Why KV cache exists](#why-kv-cache-exists)
 - [GQA](#gqa)
 - [Attention](#attention)
 - [RoPE](#rope)
@@ -42,7 +43,6 @@ After I finish text, I want to draw and add illustrations
 - [Argmax](#argmax)
 - [cublasGemmEx](#cublasgemmex)
 - [The column-major to row-major transposition trick](#the-column-major-to-row-major-transposition-trick)
-- [Why KV cache exists](#why-kv-cache-exists)
 - [Buffer reuse](#buffer-reuse)
 - [Static batching](#static-batching)
 - [Continuous batching](#continuous-batching)
@@ -153,6 +153,7 @@ First of all, we don't really know neither the order of operations or data type 
 We need to understand the order of operations to know how to code it. Sebastian Raschka has a gallery of LLM architectures and it shows nicely how the operations are organized - see [here (the left one)](https://magazine.sebastianraschka.com/i/168650848/61-qwen3-dense).
 
 By looking at the diagram from Sebastian, we see that the operations order in LLama 3.2 1B is like this:
+
 1. Send some text to the model
 2. Turn it into tokens (a new concept, we didn't mention it yet)
 3. Retrieve an embedding for each token
@@ -175,10 +176,10 @@ By looking at the diagram from Sebastian, we see that the operations order in LL
   - Residual connection add
   - RMS Norm
   - [Feed forward](https://en.wikipedia.org/wiki/Feedforward_neural_network) (like in first neural networks, [Multilayer perceptron](https://en.wikipedia.org/wiki/Multilayer_perceptron)), which consists of:
-    - Gate, first linear layer
-    - Up, second linear layer
-    - [SiLU](https://arxiv.org/pdf/1702.03118) activation function, similar to [ReLU](https://en.wikipedia.org/wiki/Rectified_linear_unit) but looking more like a sigmoid
-    - Down, third linear layer
+    - Gate projection, first linear layer
+    - Up projection, second linear layer
+    - [SiLU](https://arxiv.org/pdf/1702.03118) activation function, similar to [ReLU](https://en.wikipedia.org/wiki/Rectified_linear_unit) but it's looking more like a sigmoid
+    - Down projection, third linear layer
     - Residual connection add
 5. RMS Norm
 6. Linear output
@@ -365,7 +366,9 @@ embeddingGatherDecode(gpu_active_tokens, num_active_slots, hidden_state, weights
 
 ## Single token inference
 
-I suggest you to start coding the inference engine now. The useful learning loop, as of 2026, is for me like this and maybe you'll find it useful too:
+We start working on inference now. You can either close this course now and start coding, based on the operations sequence we laid out in [Safetensors and your model section](#safetensors-and-your-model) or you can keep reading to fill your brain cache with useful stuff based on which you will have an easier time implementing the model. Your choice 
+
+Regardless of what you choose, I'd like to share with you what is like to me to learn new things using LLMs as of 2026, maybe you'll find it useful when working on this course. I think about the learning process as of this loop:
 
 1. Understand more-or-less what you want to build
 2. Describe your mental model to a chatbot, ask it to figure out your blind spots, mistakes in your thinking, fill gaps in your knowledge with tailored information and enough context to understand
@@ -434,17 +437,46 @@ weights.w_k[5] = (__nv_bfloat16 *)((char *)model_weights + offsets.at("model.lay
 
 You need to allocate data for all tensors your model uses. Don't be afraid to overallocate and make it suboptimal. The first goal is to make it work.
 
+In section [Safetensors and your model](#safetensors-and-your-model) we laid out the exact sequence of operations we need to implement to predict the first token. Once we make it work and actually get our first token generated, we will reuse a lot of the code and write a loop around it.
+
+## Turning the input text into tokens
+
+Ok, so I assume you loaded the model and mapped the weights of the model to some useful pointers. Now we need to read user's input, the prompt, and turn it from a text to something that model understands - tokens. All mainstream LLMs use tokens, not words or characters.
+
+< TODO about embeddings retrieval >
+
 ## Prefill vs decode
 
-Incoming!
+An interesting fact about LLM inference is that it's not exactly the same process for the first predicted token vs all the next tokens. To predict the first token, you need to process all the input tokens. The input tokens are user's prompt or the chat history. All the computation that we need to do to get the first predicted token is called _prefill_. Everything that will happen after is called _decode_. 
 
-## GQA
+Most of the computation, like Q projection, attention, attention scores, feed-forward (MLP) is thrown away as soon as it's passed to the next operation - both in prefill and decode. The useful mental model is that the only thing that you preserve at every stage of LLM inference is K projection, V projection and what is the last generated token. That's it. There are interesting implications of it, for instance - you could stop the inference, copy your K and V projections and last generated token, restart the server, load them into the server and use the last generated token as the input and you'd get the same next token predicted, as in the original server instance. I hope some of you challenge my claim and actually test it - let me know if you do :D
 
-Incoming!
+## Why KV cache exists
+
+We can reuse some parts of the computation results to predict the next tokens. You don't have to reuse the results, but they don't change so computing them again and again is a pure waste. You already know that the only data that gets moved forward in the computation is K and V projection and last generated token. If we generate 1 token at the same time, both K and V are vectors of bfloat16s and last generated token is a single int. If we generate more tokens at the same time - in other words, if we do batching - both K and V are matrices of bfloat16s and last generated tokens is a vector of ints.
+
+When we process a token, regardless of whether it's prefill or decode, from perspective of data we preserve (K, V projections and last generated token) it looks the same:
+
+0. ...
+1. Compute K projection using last generated token
+2. Store it
+3. Compute V projection using last generated token
+4. Store it
+5. ...
+6. Use all K projections and all V projections to compute attention
+7. ...
+8. Generate new token
+9. Store it as last generated token
+
+Let's say we don't store K and V projection for current token. It would mean that we need to compute all K and V projections for the current and all previous tokens before we can compute attention for current token. Again, pure waste. That's the reason why store the K and V projections. It's just a record of all previous K and V projections. You don't modify it during the LLM inference. You just append to it, with every processed token. The name of this K and V projections storage is KV cache.
 
 ## Attention
 
-Incoming!
+
+
+## GQA
+
+https://arxiv.org/pdf/2305.13245
 
 ## RoPE
 
@@ -509,10 +541,6 @@ cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, KV_DIM, num_active_slots, 
 I want to preempt the last confusion you might have if you actually dig into the code. The flags `CUBLAS_OP_T` and `CUBLAS_OP_N` tell the cuBLAS which matrices to transpose. And we just derived the formula $C^T=B \times A^T$, so why do we now tell the cuBLAS to transpose the first matrix $B$? To understand it, think about column- / row-major again. From cuBLAS perspective, our row-major $B$ is transposed $B^T$, because cuBLAS reads it as if it were column-major. So we need to tell cuBLAS to transpose it, to get back the $B$ we derived. Similarly, since we derived that the second argument should be $A^T$, and cuBLAS reads row-major $A$ as a column-major $A^T$, then don't transpose it again, because it's how we wanted to provide it to the cublasGemmEx. Q.E.D. :D
 
 > I will publish this section in slightly different form in [Paged Out! Issue #9 in the article "The cuBLAS transposition trick"](https://pagedout.institute/)
-
-## Why KV cache exists
-
-Incoming!
 
 ## Buffer reuse
 

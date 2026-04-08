@@ -51,7 +51,6 @@ After I finish text, I want to draw and add illustrations
 - [Paged KV cache](#paged-kv-cache)
 - [Paged Attention CUDA kernel](#paged-attention-cuda-kernel)
 
-
 ## Intro: LLM, vLLM, models, inference servers, ???
 
 It's easy to get lost with so much going on recent years. Let's unpack it
@@ -439,11 +438,68 @@ You need to allocate data for all tensors your model uses. Don't be afraid to ov
 
 In section [Safetensors and your model](#safetensors-and-your-model) we laid out the exact sequence of operations we need to implement to predict the first token. Once we make it work and actually get our first token generated, we will reuse a lot of the code and write a loop around it.
 
-## Turning the input text into tokens
+## Tokenization
 
 Ok, so I assume you loaded the model and mapped the weights of the model to some useful pointers. Now we need to read user's input, the prompt, and turn it from a text to something that model understands - tokens. All mainstream LLMs use tokens, not words or characters.
 
-< TODO about embeddings retrieval >
+To turn text into a sequence of tokens, you need a tokenizer. We will use an existing tokenizer, which produces tokens that match the dictionary of Llama 3.2 1B. See file [python/tokenizer.py](python/tokenizer.py), where I use a tokenizer from Hugging Face
+
+Going deep into tokenizers is out of the scope, what you really need to remember is that it takes a text and produces a sequence of tokens (ints), which represent your text but as a vector of ints. And LLM needs your text as this vector of ints.
+
+> Building your own tokenizer is quite a fun thing. I wrote mine 3 years ago and feel free to use it as a reference, if you'd like to learn more about tokenizers: https://github.com/jmaczan/bpe-tokenizer. There's also a great resource from Andrej Karpathy where he builds a tokenizer, and it's very useful and educational: video https://www.youtube.com/watch?v=zduSFxRajkE, code https://github.com/karpathy/minbpe and this article https://github.com/karpathy/minbpe/blob/master/lecture.md
+
+## Embeddings
+
+Your text is translated into tokens and you feed the tokens into your LLM inference server. Tokens are more like indices, but they are not the data on which your LLM is going to work on. Large language models know how to map each token to a vector, where every token has the same vector length, but different vector values. These vectors are called embeddings. They embed the meaning of a token. Then you feed a list of tokens into the LLM, it retrieves one embedding per token, where tokens work as indexes that tell the model which embedding (vector) it should retrieve from it's weights. In our case, every embeddings has 2048 length. So for 5 input tokens, you get 5 vectors of 2048 length, which together is a matrix of dimension (5, 2048). We already know the type of every number in these embedding vectors - its bfloat16.
+
+This might be a first CUDA kernel to write in this course. Your job is to retrieve the embeddings for all the input tokens.
+
+What do you need to do that? You need input tokens and embeddings weights. You already loaded embeddings weights on your GPU. But input tokens you provide live on CPU - you can provide them as CLI params, hardcode or read from a file. By default, you load them into some vector of ints, probably. Now you need to make them available to your GPU. So what you do now?
+
+You can create a buffer on GPU where you copy your input tokens. When you do it, you will be able to use the pointer to these input tokens on GPU and pass the pointer to your CUDA kernels. This time, I will help you do it. Any other kernels and CUDA data move/allocation you will write on your own, unless they will be exceptionally interesting, okay?
+
+Let's say you have your input tokens in a vector of ints on CPU:
+
+```cpp
+std::vector<int> input_tokens = {678, 264, 1933, 13};
+```
+
+Your model, like all models, has a constraint about how many tokens it can process. For Llama 3.2 1B it's 2048. It includes both input and output tokens. We need to arbitrarily choose how many of them we allow to be the prompt size. Let's say it's going to be max 512 tokens as an input and we declare it as a [constexpr](https://en.cppreference.com/w/cpp/language/constexpr.html):
+
+```cpp
+constexpr int MAX_PROMPT_LEN = 512;
+```
+
+You need a copy of your input tokens on GPU. So, you need to allocate a memory on GPU and you need a pointer to this memory. A pointer:
+
+```cpp
+int *gpu_input_tokens;
+```
+
+To allocate the memory on GPU, we will use `cudaMalloc` function, which you already know from a chapter about GPU memory. The first argument of `cudaMalloc` is a pointer to our pointer (`void **`). The second argument is a size of memory to allocate. We know how many tokens we can maximum have as an input. The tokens are integers, so the size of memory to allocate is max number of input tokens * size of an int.
+
+```cpp
+cudaMalloc(&gpu_input_tokens, MAX_PROMPT_LEN * sizeof(int));
+```
+
+Ready to copy input tokens into GPU now:
+
+```cpp
+//              destination,              source,                              size, a direction of copying
+cudaMemcpy(gpu_input_tokens, input_tokens.data(), input_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
+```
+
+We can write a CUDA kernel now. 
+
+## CUDA kernel engineering - embeddings
+
+> There exist much better resources than I can produce, so to learn CUDA, please check out [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/introduction.html). I'll just briefly mention a basics here, but they might not be sufficient for you
+
+Kernels are functions that are executed on a GPU. You launch the same function multiple times. Every launched function is a separate thread. They run the same code. They receive slightly different parameters, like index of a thread. Threads are grouped into blocks. When you launch a CUDA kernel, you define how many blocks you want to invoke and how many threads are there in every block. Threads are also grouped into warps. Every warp has 32 threads. So, when you run your kernel and you define that it has to run 5 blocks and each block has to run 64 threads, then it means that each block runs 2 warps, 32 threads in each warp. 
+
+When writing CUDA kernels, a lot of effort goes into thinking about memory. I mean, it's like thinking from the thread perspective: "what data should I process?", "where I should write the results?". It in practice means figuring out index of input data you need to read and where you should write the output to. Your main tools are built-in variables, like threadIdx, blockIdx and blockDim - see this link for more structured info https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html. Every thread has it's own values of these variables. This makes possible to running the same computation in parallel. This approach is called [SIMT](https://en.wikipedia.org/wiki/Single_instruction,_multiple_threads).
+
+Notice that while all these embeddings we retrieve for input tokens have some encoded meaning within them, they don't know about each other. They don't know their position within a text we provided as an input. They don't know what tokens they are surrounded with. They don't know the conversation history, etc etc. This understanding will be build and stored as K and V projections.
 
 ## Prefill vs decode
 
@@ -472,7 +528,7 @@ Let's say we don't store K and V projection for current token. It would mean tha
 
 ## Attention
 
-
+https://arxiv.org/pdf/1706.03762
 
 ## GQA
 
@@ -575,5 +631,7 @@ Incoming!
 ## Paged Attention CUDA kernel
 
 Incoming!
+
+TODO: synchronize section names with ToC and add drawings
 
 Jędrzej Maczan, 2026, Apache License 2.0

@@ -814,9 +814,73 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_
 
 In our reference model, the next operation after RMSNorm is [RoPE](https://arxiv.org/pdf/2104.09864), a way of encoding tokens position into the hidden state (embedding). Very approachable description of positional encoding using RoPE is [here by Christopher Fleetwood](https://fleetwood.dev/posts/you-could-have-designed-SOTA-positional-encoding).
 
+Try to write it on your own, if you have an energy for that. If not, here's my finished kernel. There are some things that I could optimize, like some values can be precomputed once and then shared - see theta and angles
+
+```cpp
+__global__ void ropeKernel(__nv_bfloat16 *input, int num_tokens, int proj_dim)
+{
+    if (2 * threadIdx.x + 1 + blockIdx.x * proj_dim < num_tokens * proj_dim)
+    {
+        // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel invocations
+        int double_i = 2 * (threadIdx.x % 32);
+        float theta = 1.0 / (pow(500000.0, ((float)double_i / HEAD_DIM)));
+        float angle = blockIdx.x * theta;
+        __nv_bfloat16 prev_2i = input[2 * threadIdx.x + blockIdx.x * proj_dim];
+        __nv_bfloat16 prev_2i_1 = input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim];
+        input[2 * threadIdx.x + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * cos(angle) - (float)prev_2i_1 * sin(angle));
+        input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * sin(angle) + (float)prev_2i_1 * cos(angle));
+    }
+}
+
+// proj_dim: q_proj 2048, k_proj 512
+// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512 for k_proj)
+void rope(__nv_bfloat16 *input, int num_tokens, int proj_dim)
+{
+    int num_threads = proj_dim / 2;
+    if (num_threads > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, RoPE kernel not launched";
+        return;
+    }
+
+    ropeKernel<<<num_tokens, num_threads>>>(input, num_tokens, proj_dim);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+```
+
+< TODO describe in more details >
+
 ## Residual connections
 
-Incoming!
+It's a simple technique used in many different deep learning models, where you add inputs to the outputs, so your input data is never fully gone. It's done for stability in training. See [more info here](https://towardsdatascience.com/what-is-residual-connection-efb07cab0d55/). From our perspective it's just adding two same sized vectors, elementwise.
+
+```cpp
+__global__ void residualKernel(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds)
+{
+    int workIndex = threadIdx.x + blockIdx.x * 2048;
+    input[workIndex] = input[workIndex] + input_embeds[workIndex];
+    input[workIndex + 1024] = input[workIndex + 1024] + input_embeds[workIndex + 1024];
+}
+
+// (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
+void residualAdd(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_tokens)
+{
+    residualKernel<<<num_tokens, 1024>>>(input, input_embeds);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+```
 
 ## cublasGemmEx
 
@@ -884,48 +948,193 @@ When we process a token, regardless of whether it's prefill or decode, from pers
 
 Let's say we don't store K and V projection for current token. It would mean that we need to compute all K and V projections for the current and all previous tokens before we can compute attention for current token. Again, pure waste. That's the reason why store the K and V projections. It's just a record of all previous K and V projections. You don't modify it during the LLM inference. You just append to it, with every processed token. The name of this K and V projections storage is KV cache.
 
-
 ## Attention
 
 Attention is an important part of LLM inference. It's where you do a lot of matrix multiplication using Q, K and V projections you computed earlier. A basic formula for scaled dot-product attention that comes from a paper [Attention is all you need](https://arxiv.org/pdf/1706.03762) is:
 
 $$\text{Attention}(Q,K,V)=\text{softmax}(\frac{QK^T}{\sqrt{d_k}})V$$
 
+< TODO: this section is difficult to write, but I want to make it good and useful to you. Putting code here now, and want to come back to writing it Later™ >
+
+
+```cpp
+for (int i = 0; i < NUM_Q_HEADS; ++i)
+{
+    int k_head_idx = i / GQA_Q_TO_K_RATIO; // i / 4 <- it means 4 Q heads uses the same 1 K head
+    __nv_bfloat16 *q_head = q_proj + i * HEAD_DIM;
+    __nv_bfloat16 *k_head = k_proj[layer] + k_head_idx * HEAD_DIM;
+    __nv_bfloat16 *attn_score_head = attn_scores + input_tokens.size() * input_tokens.size() * i;
+
+    cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
+                                                    CUBLAS_OP_T,
+                                                    CUBLAS_OP_N,
+                                                    input_tokens.size(),
+                                                    input_tokens.size(),
+                                                    HEAD_DIM,
+                                                    &attn_alpha,
+                                                    k_head,
+                                                    CUDA_R_16BF,
+                                                    KV_DIM,
+                                                    q_head,
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    &attn_beta,
+                                                    attn_score_head,
+                                                    CUDA_R_16BF,
+                                                    input_tokens.size(),
+                                                    CUBLAS_COMPUTE_32F,
+                                                    CUBLAS_GEMM_DEFAULT);
+}
+
+// causal mask, softmax and then attention scores * V
+        // attn scores * V
+        // (32, num_tok, num_tok) * (num_tok, 512)
+        // GQA - 4 Q heads share 1 V head
+        // attn_scores dim (32, num_tok, num_tok)
+        // attn_scores head dim (num_tok, num_tok)
+        // V dim (num_tok, 512)
+        // NUM_V_HEADS is 8 -> 512 / 8 = 64
+        // V_head dim (num_tok, 64)
+        // output head dim: scores head * V head -> (num_tok, num_tok) * (num_tok, 64) = (num_tok, 64)
+        // in total 32 output heads: so (num_tok, 64 * 32) = (num_tok, 2048)
+for (int i = 0; i < NUM_Q_HEADS; ++i)
+{
+    int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO; // GQA, 4 Q heads for 1 V head
+    // i * input_tokens.size() * input_tokens.size(),  because attn scores is (32, num_tok, num_tok)
+    __nv_bfloat16 *attn_scores_head = attn_scores + i * input_tokens.size() * input_tokens.size();
+    __nv_bfloat16 *v_head = v_proj[layer] + v_head_idx * HEAD_DIM;
+    __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
+
+    cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
+                                                    CUBLAS_OP_N,
+                                                    CUBLAS_OP_N,
+                                                    HEAD_DIM,
+                                                    input_tokens.size(),
+                                                    input_tokens.size(),
+                                                    &attn_scores_v_alpha,
+                                                    v_head,
+                                                    CUDA_R_16BF,
+                                                    KV_DIM,
+                                                    attn_scores_head,
+                                                    CUDA_R_16BF,
+                                                    input_tokens.size(),
+                                                    &attn_scores_v_beta,
+                                                    output_attn_scores_head,
+                                                    CUDA_R_16BF,
+                                                    EMBEDDING_LENGTH,
+                                                    CUBLAS_COMPUTE_32F,
+                                                    CUBLAS_GEMM_DEFAULT);
+}
+```
+
 ## GQA
 
-https://arxiv.org/pdf/2305.13245
+Unlike in a multi-head attention, one of the first attention methods, in [group-query attention (GQA)](https://arxiv.org/pdf/2305.13245) multiple query heads share the same key and value head. In our case, it's like: 4 query heads use the same 1 key and value head. See the code with computation K/V heads above.
+
+< TODO describe in more details >
 
 ## SiLU
 
-Incoming!
+[SiLU](https://arxiv.org/pdf/1702.03118) is an activation function used in our reference LLM. It introduces "non-linearity" into a model. It means that weights can be zeroed when they are not needed. It helps in training models. Almost all machine learning models have them in their architecture, even the simplest multi-layer perceptrons. In fact, as far as I remember, models couldn't generalize good enough without activation functions. SiLU is similar to ReLU, but when negative values approach 0, there are not zeroed, but get small negative value instead. 
+
+```cpp
+__global__ void siluKernel(__nv_bfloat16 *a, __nv_bfloat16 *b)
+{
+    int workIndex = threadIdx.x + blockIdx.x * 8192;
+    for (int i = 0; i < 8192; i += 1024)
+    {
+        a[workIndex + i] = (__nv_bfloat16)((float)a[workIndex + i] * (1 / (1 + expf(-(float)a[workIndex + i]))) * (float)b[workIndex + i]);
+    }
+}
+
+// in-place, overwriting a
+void silu(__nv_bfloat16 *a, __nv_bfloat16 *b, int num_tokens)
+{
+    siluKernel<<<num_tokens, 1024>>>(a, b);
+}
+```
 
 ## Causal mask
 
-Incoming!
+Every token can attend only to previous tokens. See [this good and straighforward explanation](https://outcomeschool.com/blog/causal-masking-in-attention), so you can code it by yourself. It's really helpful to see the diagrams.
+
+< TODO write more >
+
+```cpp
+__global__ void causalMaskKernel(__nv_bfloat16 *input, int num_tokens)
+{
+    if (threadIdx.x + blockIdx.x * blockDim.x >= num_tokens * num_tokens * NUM_Q_HEADS)
+    {
+        return;
+    }
+
+    int column = threadIdx.x;
+    int row = blockIdx.x % num_tokens;
+    if (column > row)
+    {
+        input[blockIdx.x * num_tokens + threadIdx.x] = -HUGE_VALF;
+    }
+}
+
+void causalMask(__nv_bfloat16 *input, int num_tokens)
+{
+    if (num_tokens > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, Causal mask kernel not launched";
+        return;
+    }
+
+    causalMaskKernel<<<num_tokens * NUM_Q_HEADS, num_tokens>>>(input, num_tokens);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+```
 
 ## Argmax
 
-Incoming!
+Pick the token that has a highest score. 
+
+```cpp
+cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * VOCAB_SIZE, cudaMemcpyDeviceToHost);
+max_token = (float)embed_proj_cpu[0];
+max_token_idx = 0;
+for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
+{
+    if ((float)embed_proj_cpu[token_idx] > max_token)
+    {
+        max_token = embed_proj_cpu[token_idx];
+        max_token_idx = token_idx;
+    }
+}
+std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
+```
 
 ## Buffer reuse
 
-Lifetimes analysis
+Sometimes, a buffer you allocate has the same size as a buffer that will be used later in the code. And sometimes, when second buffer starts to be needed after when data in the first buffer is not needed anymore (it was already used in a computation and won't be used anywhere else), then we can use the first buffer to write data, which we would write to the second buffer. This way, we can allocate less memory. It means we reuse the same buffer between two different places. We can safely do it, once we confirm by lifetime analysis that lifetimes of these two buffers don't overlap. See how it works in for `buf_2048_1` and `buf_2028_2` in [`src/main.cpp`](src/main.cpp)
 
-Incoming!
+< TODO write more and explain lifetimes analysis >
 
 ## Static batching
 
-Incoming!
+Instead of processing one request at a time, we process N requests. The pros: bigger throughput (more user requests processed at the same time). The cons: higher latency (all prompts in the batch need to wait until the longest prompt finishes processing, before being returned to the user).
+
+< TODO write more >
 
 ## Continuous batching
 
-Incoming!
+Solves the problem of needing to wait for a longest prompt in batch to be processed. It solves it by having slots in a batch. You fill prompts into slots. Once generation in a given slot is finished, the result from it is returned to the user. A prompt that awaits in a queue gets selected for the freshly emptied slot. The prompt goes through the prefill (all other elements in batch wait until it's finished). Once prefill is done, batching continues with all the elements of batch, including the new one.
+
+< TODO write more >
 
 ## Online softmax
 
-Math derivation
-
-Incoming!
+< TODO write more and write down the math derivation >
 
 ## Paged Attention
 

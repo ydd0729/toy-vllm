@@ -3,7 +3,7 @@
 
 // TODO perhaps share these between main.cpp and kernels.cu to not duplicate them?
 
-constexpr int N_LAYERS = 16; // TODO: hardcoded for llama 3.2 1B, just like any other value for now
+constexpr int N_LAYERS = 16; // hardcoded for llama 3.2 1B, just like any other value for now
 constexpr int EMBEDDING_LENGTH = 2048;
 constexpr int KV_DIM = 512;
 constexpr int HEAD_DIM = 64;
@@ -22,7 +22,10 @@ constexpr int MAX_BLOCKS_PER_SEQ = MAX_SEQ_LEN / BLOCK_SIZE; // 2048 / 16 = 128
 // gpu_input_embeds - N * sizeof(__nv_bfloat16) * 2048
 // embed_tokens - (100000+smth, 2048)
 // num_input_tokens - N (just N, not N tokens)
-__global__ void embeddingGatherKernel(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __nv_bfloat16 *embed_tokens, int num_input_tokens)
+__global__ void embeddingGatherKernel(int* gpu_input_tokens,
+                                      __nv_bfloat16* gpu_input_embeds,
+                                      __nv_bfloat16* embed_tokens,
+                                      int num_input_tokens)
 {
     int workIndex = threadIdx.x + blockIdx.x * 2048;
     if (workIndex < num_input_tokens * 2048)
@@ -32,10 +35,14 @@ __global__ void embeddingGatherKernel(int *gpu_input_tokens, __nv_bfloat16 *gpu_
     }
 }
 
-void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __nv_bfloat16 *embed_tokens, int num_input_tokens)
+void embeddingGather(int* gpu_input_tokens,
+                     __nv_bfloat16* gpu_input_embeds,
+                     __nv_bfloat16* embed_tokens,
+                     int num_input_tokens)
 {
     // even though embedding is 2048, I can only dispatch 1024 because it's max threads per block on my gpu
-    embeddingGatherKernel<<<num_input_tokens, 1024>>>(gpu_input_tokens, gpu_input_embeds, embed_tokens, num_input_tokens);
+    embeddingGatherKernel<<<num_input_tokens, 1024>>>(gpu_input_tokens, gpu_input_embeds, embed_tokens,
+                                                      num_input_tokens);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
@@ -45,13 +52,14 @@ void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __n
 #endif
 }
 
-__global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_bfloat16 *norm_weights, int num_tokens)
+__global__ void rmsNormKernel(__nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16* norm_weights, int num_tokens)
 {
     __shared__ float rms_vector[1024];
     int workIndex = threadIdx.x + blockIdx.x * 2048;
     if (workIndex < num_tokens * 2048)
     {
-        rms_vector[threadIdx.x] = (float)input[workIndex] * (float)input[workIndex] + (float)input[workIndex + 1024] * (float)input[workIndex + 1024];
+        rms_vector[threadIdx.x] = (float) input[workIndex] * (float) input[workIndex] +
+                                  (float) input[workIndex + 1024] * (float) input[workIndex + 1024];
         __syncthreads();
         // tree reduction
         for (int i = 1; i < 1024; i = i * 2)
@@ -68,13 +76,15 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_
         }
         __syncthreads();
         // <(^-^)>
-        output[workIndex] = (__nv_bfloat16)(((float)input[workIndex] / rms_vector[0]) * (float)norm_weights[threadIdx.x]);
-        output[workIndex + 1024] = (__nv_bfloat16)(((float)input[workIndex + 1024] / rms_vector[0]) * (float)norm_weights[threadIdx.x + 1024]);
+        output[workIndex] =
+            (__nv_bfloat16) (((float) input[workIndex] / rms_vector[0]) * (float) norm_weights[threadIdx.x]);
+        output[workIndex + 1024] = (__nv_bfloat16) (((float) input[workIndex + 1024] / rms_vector[0]) *
+                                                    (float) norm_weights[threadIdx.x + 1024]);
     }
 }
 
 // (N, 2048) -> (N, 2048)
-void rmsNorm(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_bfloat16 *norm_weights, int num_tokens)
+void rmsNorm(__nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16* norm_weights, int num_tokens)
 {
     rmsNormKernel<<<num_tokens, 1024>>>(input, output, norm_weights, num_tokens);
 #ifdef DEBUG
@@ -86,24 +96,27 @@ void rmsNorm(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_bfloat16 *norm_we
 #endif
 }
 
-__global__ void ropeKernel(__nv_bfloat16 *input, int num_tokens, int proj_dim)
+__global__ void ropeKernel(__nv_bfloat16* input, int num_tokens, int proj_dim)
 {
     if (2 * threadIdx.x + 1 + blockIdx.x * proj_dim < num_tokens * proj_dim)
     {
         // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel invocations
         int double_i = 2 * (threadIdx.x % 32);
-        float theta = 1.0 / (pow(500000.0, ((float)double_i / HEAD_DIM)));
+        float theta = 1.0 / (pow(500000.0, ((float) double_i / HEAD_DIM)));
         float angle = blockIdx.x * theta;
         __nv_bfloat16 prev_2i = input[2 * threadIdx.x + blockIdx.x * proj_dim];
         __nv_bfloat16 prev_2i_1 = input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim];
-        input[2 * threadIdx.x + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * cos(angle) - (float)prev_2i_1 * sin(angle));
-        input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * sin(angle) + (float)prev_2i_1 * cos(angle));
+        input[2 * threadIdx.x + blockIdx.x * proj_dim] =
+            (__nv_bfloat16) ((float) prev_2i * cos(angle) - (float) prev_2i_1 * sin(angle));
+        input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim] =
+            (__nv_bfloat16) ((float) prev_2i * sin(angle) + (float) prev_2i_1 * cos(angle));
     }
 }
 
 // proj_dim: q_proj 2048, k_proj 512
-// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512 for k_proj)
-void rope(__nv_bfloat16 *input, int num_tokens, int proj_dim)
+// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512
+// for k_proj)
+void rope(__nv_bfloat16* input, int num_tokens, int proj_dim)
 {
     int num_threads = proj_dim / 2;
     if (num_threads > 1024)
@@ -122,7 +135,7 @@ void rope(__nv_bfloat16 *input, int num_tokens, int proj_dim)
 #endif
 }
 
-__global__ void causalMaskKernel(__nv_bfloat16 *input, int num_tokens)
+__global__ void causalMaskKernel(__nv_bfloat16* input, int num_tokens)
 {
     if (threadIdx.x + blockIdx.x * blockDim.x >= num_tokens * num_tokens * NUM_Q_HEADS)
     {
@@ -137,7 +150,7 @@ __global__ void causalMaskKernel(__nv_bfloat16 *input, int num_tokens)
     }
 }
 
-void causalMask(__nv_bfloat16 *input, int num_tokens)
+void causalMask(__nv_bfloat16* input, int num_tokens)
 {
     if (num_tokens > 1024)
     {
@@ -155,7 +168,7 @@ void causalMask(__nv_bfloat16 *input, int num_tokens)
 #endif
 }
 
-__global__ void softmaxKernel(__nv_bfloat16 *input, int num_tokens)
+__global__ void softmaxKernel(__nv_bfloat16* input, int num_tokens)
 {
     // softmaxxing per head
     // might waste a lot of memory by hardcoding the size here but can't use num_tokens directly
@@ -164,7 +177,7 @@ __global__ void softmaxKernel(__nv_bfloat16 *input, int num_tokens)
     // find max of the row to subtract it for numerical stability
     int workIndex = blockIdx.x * num_tokens + threadIdx.x;
     __nv_bfloat16 token = input[workIndex];
-    row[threadIdx.x] = (float)token;
+    row[threadIdx.x] = (float) token;
     __syncthreads();
 
     for (int i = 1; i < num_tokens; i = i * 2)
@@ -182,7 +195,7 @@ __global__ void softmaxKernel(__nv_bfloat16 *input, int num_tokens)
     __syncthreads();
 
     // turn into exp
-    row[threadIdx.x] = expf((float)token - max_val);
+    row[threadIdx.x] = expf((float) token - max_val);
     __syncthreads();
 
     // now I can compute the numerical stable sum, similar pattern - tree reduction
@@ -196,11 +209,11 @@ __global__ void softmaxKernel(__nv_bfloat16 *input, int num_tokens)
         __syncthreads();
     }
 
-    input[workIndex] = (__nv_bfloat16)(expf((float)token - max_val) / row[0]);
+    input[workIndex] = (__nv_bfloat16) (expf((float) token - max_val) / row[0]);
 }
 
 // input are masked attention scores (NUM_Q_HEADS, num_tok, num_tok)
-void softmax(__nv_bfloat16 *input, int num_tokens)
+void softmax(__nv_bfloat16* input, int num_tokens)
 {
     if (num_tokens > 1024)
     {
@@ -218,7 +231,7 @@ void softmax(__nv_bfloat16 *input, int num_tokens)
 #endif
 }
 
-__global__ void residualKernel(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds)
+__global__ void residualKernel(__nv_bfloat16* input, __nv_bfloat16* input_embeds)
 {
     int workIndex = threadIdx.x + blockIdx.x * 2048;
     input[workIndex] = input[workIndex] + input_embeds[workIndex];
@@ -226,7 +239,7 @@ __global__ void residualKernel(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds
 }
 
 // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-void residualAdd(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_tokens)
+void residualAdd(__nv_bfloat16* input, __nv_bfloat16* input_embeds, int num_tokens)
 {
     residualKernel<<<num_tokens, 1024>>>(input, input_embeds);
 #ifdef DEBUG
@@ -238,23 +251,25 @@ void residualAdd(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_toke
 #endif
 }
 
-__global__ void siluKernel(__nv_bfloat16 *a, __nv_bfloat16 *b)
+__global__ void siluKernel(__nv_bfloat16* a, __nv_bfloat16* b)
 {
     int workIndex = threadIdx.x + blockIdx.x * 8192;
     for (int i = 0; i < 8192; i += 1024)
     {
-        a[workIndex + i] = (__nv_bfloat16)((float)a[workIndex + i] * (1 / (1 + expf(-(float)a[workIndex + i]))) * (float)b[workIndex + i]);
+        a[workIndex + i] = (__nv_bfloat16) ((float) a[workIndex + i] * (1 / (1 + expf(-(float) a[workIndex + i]))) *
+                                            (float) b[workIndex + i]);
     }
 }
 
 // in-place, overwriting a
-void silu(__nv_bfloat16 *a, __nv_bfloat16 *b, int num_tokens)
+void silu(__nv_bfloat16* a, __nv_bfloat16* b, int num_tokens)
 {
     siluKernel<<<num_tokens, 1024>>>(a, b);
 }
 
 // decode
-__global__ void embeddingGatherKernelDecode(int *gpu_last_tokens, int num_tokens, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
+__global__ void
+embeddingGatherKernelDecode(int* gpu_last_tokens, int num_tokens, __nv_bfloat16* output, __nv_bfloat16* embed_tokens)
 {
     int input_token = gpu_last_tokens[blockIdx.x];
     int workIndex = blockIdx.x * 2048 + threadIdx.x;
@@ -265,7 +280,7 @@ __global__ void embeddingGatherKernelDecode(int *gpu_last_tokens, int num_tokens
     }
 }
 
-void embeddingGatherDecode(int *gpu_last_tokens, int num_tokens, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
+void embeddingGatherDecode(int* gpu_last_tokens, int num_tokens, __nv_bfloat16* output, __nv_bfloat16* embed_tokens)
 {
     // even though embedding is 2048, I can only dispatch 1024 because it's max threads per block on my gpu
     embeddingGatherKernelDecode<<<num_tokens, 1024>>>(gpu_last_tokens, num_tokens, output, embed_tokens);
@@ -278,24 +293,25 @@ void embeddingGatherDecode(int *gpu_last_tokens, int num_tokens, __nv_bfloat16 *
 #endif
 }
 
-__global__ void ropeKernelDecode(__nv_bfloat16 *input, int position_in_sequence, int proj_dim)
+__global__ void ropeKernelDecode(__nv_bfloat16* input, int position_in_sequence, int proj_dim)
 {
     if (2 * threadIdx.x + 1 < proj_dim) // TODO: check correctness
     {
         // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel invocations
         int double_i = 2 * (threadIdx.x % 32);
-        float theta = 1.0 / (pow(500000.0, ((float)double_i / HEAD_DIM)));
+        float theta = 1.0 / (pow(500000.0, ((float) double_i / HEAD_DIM)));
         float angle = position_in_sequence * theta;
         __nv_bfloat16 prev_2i = input[2 * threadIdx.x];
         __nv_bfloat16 prev_2i_1 = input[2 * threadIdx.x + 1];
-        input[2 * threadIdx.x] = (__nv_bfloat16)((float)prev_2i * cos(angle) - (float)prev_2i_1 * sin(angle));
-        input[2 * threadIdx.x + 1] = (__nv_bfloat16)((float)prev_2i * sin(angle) + (float)prev_2i_1 * cos(angle));
+        input[2 * threadIdx.x] = (__nv_bfloat16) ((float) prev_2i * cos(angle) - (float) prev_2i_1 * sin(angle));
+        input[2 * threadIdx.x + 1] = (__nv_bfloat16) ((float) prev_2i * sin(angle) + (float) prev_2i_1 * cos(angle));
     }
 }
 
 // proj_dim: q_proj 2048, k_proj 512
-// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512 for k_proj)
-void ropeDecode(__nv_bfloat16 *input, int position_in_sequence, int proj_dim)
+// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512
+// for k_proj)
+void ropeDecode(__nv_bfloat16* input, int position_in_sequence, int proj_dim)
 {
     int num_threads = proj_dim / 2;
     if (num_threads > 1024)
@@ -315,7 +331,7 @@ void ropeDecode(__nv_bfloat16 *input, int position_in_sequence, int proj_dim)
 }
 
 // seq_len increases by 1 with every new token
-__global__ void softmaxKernelDecode(__nv_bfloat16 *input, int seq_len)
+__global__ void softmaxKernelDecode(__nv_bfloat16* input, int seq_len)
 {
     // softmaxxing per head
     // might waste a lot of memory by hardcoding the size here but can't use num_tokens directly
@@ -324,7 +340,7 @@ __global__ void softmaxKernelDecode(__nv_bfloat16 *input, int seq_len)
     // find max of the row to subtract it for numerical stability
     int workIndex = blockIdx.x * MAX_SEQ_LEN + threadIdx.x;
     __nv_bfloat16 token = input[workIndex];
-    row[threadIdx.x] = (float)token;
+    row[threadIdx.x] = (float) token;
     __syncthreads();
 
     for (int i = 1; i < seq_len; i = i * 2)
@@ -342,7 +358,7 @@ __global__ void softmaxKernelDecode(__nv_bfloat16 *input, int seq_len)
     __syncthreads();
 
     // turn into exp
-    row[threadIdx.x] = expf((float)token - max_val);
+    row[threadIdx.x] = expf((float) token - max_val);
     __syncthreads();
 
     // now I can compute the numerical stable sum, similar pattern - tree reduction
@@ -356,11 +372,11 @@ __global__ void softmaxKernelDecode(__nv_bfloat16 *input, int seq_len)
         __syncthreads();
     }
 
-    input[workIndex] = (__nv_bfloat16)(expf((float)token - max_val) / row[0]);
+    input[workIndex] = (__nv_bfloat16) (expf((float) token - max_val) / row[0]);
 }
 
 // input are masked attention scores (NUM_Q_HEADS, seq_len)
-void softmaxDecode(__nv_bfloat16 *input, int seq_len)
+void softmaxDecode(__nv_bfloat16* input, int seq_len)
 {
     if (seq_len > 1024)
     {
@@ -378,8 +394,16 @@ void softmaxDecode(__nv_bfloat16 *input, int seq_len)
 #endif
 }
 
-// inside a single particular thread that processes a single position of particular Q head for a particular sequence, for particular layer
-__global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots, __nv_bfloat16 *output)
+// inside a single particular thread that processes a single position of particular Q head for a particular sequence,
+// for particular layer
+__global__ void pagedAttentionKernel(int layer,
+                                     int num_active_slots,
+                                     __nv_bfloat16* q_proj,
+                                     __nv_bfloat16* kv_cache,
+                                     int* block_table_gpu,
+                                     int* gpu_seq_lens,
+                                     int* gpu_active_slots,
+                                     __nv_bfloat16* output)
 {
     __shared__ float dot_products[2];
     int active_slot = blockIdx.x; // active_slot == seq_id
@@ -398,13 +422,20 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
 
     for (int logical_block_idx = 0; logical_block_idx < num_blocks; ++logical_block_idx)
     {
-        int physical_block = block_table_gpu[slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
+        int physical_block =
+            block_table_gpu[slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
         int tokens_in_block = min(seq_len - logical_block_idx * BLOCK_SIZE, BLOCK_SIZE);
         for (int token = 0; token < tokens_in_block; ++token)
         {
-            __nv_bfloat16 *k = (__nv_bfloat16 *)((char *)kv_cache + physical_block * BLOCK_BYTES + token * KV_DIM * sizeof(__nv_bfloat16) + kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
-            __nv_bfloat16 *v = (__nv_bfloat16 *)((char *)kv_cache + physical_block * BLOCK_BYTES + V_OFFSET + token * KV_DIM * sizeof(__nv_bfloat16) + kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
-            float qk = (float)q * (float)*k;
+            __nv_bfloat16* k =
+                (__nv_bfloat16*) ((char*) kv_cache + physical_block * BLOCK_BYTES +
+                                  token * KV_DIM * sizeof(__nv_bfloat16) +
+                                  kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
+            __nv_bfloat16* v =
+                (__nv_bfloat16*) ((char*) kv_cache + physical_block * BLOCK_BYTES + V_OFFSET +
+                                  token * KV_DIM * sizeof(__nv_bfloat16) +
+                                  kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
+            float qk = (float) q * (float) *k;
             // tree reduction within current warp, thread 0 gets sum of all 32 elements within warp
             // could be done with __syncthreads but accessing memory of other threads in warp is op
             qk += __shfl_down_sync(0xffffffff, qk, 16);
@@ -437,13 +468,21 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
             current_max = new_max;
             float exp_score = expf(dot_product - current_max);
             d = d * correction_factor + exp_score;
-            acc = acc * correction_factor + exp_score * (float)*v;
+            acc = acc * correction_factor + exp_score * (float) *v;
         }
     }
     output[active_slot * EMBEDDING_LENGTH + q_head_id * HEAD_DIM + thread_id] = acc / d;
 }
 
-void pagedAttention(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots, __nv_bfloat16 *output)
+void pagedAttention(int layer,
+                    int num_active_slots,
+                    __nv_bfloat16* q_proj,
+                    __nv_bfloat16* kv_cache,
+                    int* block_table_gpu,
+                    int* gpu_seq_lens,
+                    int* gpu_active_slots,
+                    __nv_bfloat16* output)
 {
-    pagedAttentionKernel<<<dim3(num_active_slots, NUM_Q_HEADS), HEAD_DIM>>>(layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots, output);
+    pagedAttentionKernel<<<dim3(num_active_slots, NUM_Q_HEADS), HEAD_DIM>>>(
+        layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots, output);
 }

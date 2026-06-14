@@ -47,3 +47,5 @@ model.safetensors
 *.sqlite
 temp.txt
 temp*.md
+.vs/
+header.json

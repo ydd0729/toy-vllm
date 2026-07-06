@@ -1,6 +1,7 @@
 #include "weights.hpp"
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -25,13 +26,15 @@
  */
 Weights::Weights()
 {
-    std::ifstream safetensors_file("models/Llama-3.2-1B/model.safetensors", std::ios_base::binary);
+    std::filesystem::path weights_path =
+        std::filesystem::path("models") / "Llama-3.2-1B" / "model.safetensors";
+
+    std::ifstream safetensors_file(weights_path, std::ios_base::binary);
 
     if (!safetensors_file.is_open())
     {
-        std::cout << "Can't open model.safetensors file\n";
-        safetensors_file.close();
-        throw std::runtime_error("Can't open model.safetensors file");
+        throw std::runtime_error(
+            std::format("Can't open {}", weights_path.string()));
     }
 
     // 前 8 字节是 header 长度（uint64_t，小端序）

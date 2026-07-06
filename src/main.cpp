@@ -1,3 +1,8 @@
+// 禁用 nlohmann/json 库的隐式类型转换。
+// 设置后，json 对象不能自动转换为基本类型（如 int、string），
+// 必须显式调用 .get<T>()，避免意外的类型转换错误。
+#define JSON_USE_IMPLICIT_CONVERSIONS 0
+
 #include <iostream>
 #include <numeric>
 #include <fstream>
@@ -7,921 +12,399 @@
 #include <string>
 #include <vector>
 #include <driver_types.h>
-#include <cuda_runtime_api.h>
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 #include "kernels.cuh"
-
-// 禁用 nlohmann/json 库的隐式类型转换。
-// 设置后，json 对象不能自动转换为基本类型（如 int、string），
-// 必须显式调用 .get<T>()，避免意外的类型转换错误。
-#define JSON_USE_IMPLICIT_CONVERSIONS 0
+#include "config.hpp"
+#include "inference.hpp"
+#include "weights.hpp"
+#include "cuda_utils.hpp"
+#include "utils.hpp"
 
 using json = nlohmann::json;
-using std::vector;
 using std::string;
-using std::to_string;
+using std::vector;
 
-constexpr int MAX_NEW_TOKENS_GENERATED = 20; // TODO: parameterize it with program arguments
-constexpr int B_TO_MB = 1024 * 1024;
-constexpr int B_TO_GB = 1024 * 1024 * 1024;
-constexpr int N_LAYERS = 16; // hardcoded for llama 3.2 1B
-constexpr int EMBEDDING_LENGTH = 2048;
-constexpr int HIDDEN_DIM = 8192;
-constexpr int KV_DIM = 512;
-constexpr int HEAD_DIM = 64;
-constexpr int NUM_Q_HEADS = 32;
-constexpr int NUM_K_HEADS = 8;
-constexpr int NUM_V_HEADS = 8;
-constexpr int GQA_Q_TO_K_RATIO = 4;
-constexpr int GQA_ATTN_SCORES_TO_V_RATIO = 4;
-constexpr int VOCAB_SIZE = 128256;
-constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>
-constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>
-constexpr int MAX_SEQ_LEN = 2048;            // TODO: make it tunable
-constexpr int BATCH_SIZE = 2;                // TODO: not even close to being good, it's just here to have batching
-constexpr int MAX_PROMPT_LEN = 512;          // Llama 3.2 1B supports 2048 at most for both input & output
-constexpr int MAX_BUFFER_SIZE = std::max(MAX_PROMPT_LEN, BATCH_SIZE);
-constexpr int BLOCK_SIZE = 16; // TODO: tunable as well, defined the size of a single page in pagedattn
-constexpr int V_OFFSET = BLOCK_SIZE * KV_DIM * sizeof(__nv_bfloat16);
-constexpr int BLOCK_BYTES = V_OFFSET * 2;                         // * 2 because K and V
-constexpr size_t KV_CACHE_SIZE_BYTES = 2ULL * 1024 * 1024 * 1024; // TODO: 2GB
-constexpr int MAX_BLOCKS_PER_SEQ = MAX_SEQ_LEN / BLOCK_SIZE;      // 2048 / 16 = 128
-constexpr int NUM_BLOCKS = KV_CACHE_SIZE_BYTES / BLOCK_BYTES;     // 2*1024*1024*1024/(16*512*2*2) = 65536
-constexpr int MAX_SEQUENCES = BATCH_SIZE;
-
-static int checkGPUStatus()
+/**
+ * @brief Prefill 阶段：一次性处理整个 prompt，填充 KV Cache 并生成第一个 token
+ *
+ * LLM 推理分为两个阶段：
+ *   1. Prefill（本函数）：并行处理 N 个输入 token，填充 KV Cache，输出第一个生成 token
+ *   2. Decode（main 中的 while 循环）：逐 token 生成，每次只处理 1 个新 token
+ *
+ * 流程：
+ *   embedding -> [RMSNorm -> QKV proj -> RoPE -> KV cache scatter -> Attention -> O proj ->
+ * residual
+ *                 -> RMSNorm -> MLP(gate/up/SiLU/down) -> residual] x N_LAYERS
+ *             -> RMSNorm -> logits -> argmax -> 第一个生成 token
+ *
+ * 注意：参数列表较长是因为 GPU 缓冲区、cuBLAS 句柄和各种临时变量都从 main 传入以复用内存。
+ *
+ * @param prompt_queue        [输入] 等待处理的 prompt 队列
+ * @param slot                [输入] 当前 prompt 分配到的 batch slot 索引
+ * @param weights             [输入] 模型权重（各层 GPU 指针）
+ */
+void prefill(std::queue<vector<int>>& prompt_queue,
+             int slot,
+             InferenceContext& ctx,
+             PagedKVCache& pkv,
+             BatchState& bs,
+             Weights& weights)
 {
-    int device_count = 0;
-    cudaGetDeviceCount(&device_count);
-    if (device_count == 0)
+    // 获取当前 prompt
+    auto prompt = prompt_queue.front();
+    prompt_queue.pop();
+
+    // 标记当前 batch slot 为已占用，防止其他 prompt 被分配到同一 slot
+    bs.is_slot_free[slot] = false;
+    // 记录该 slot 装的是第几个请求（对应 PROMPT N），用于把输出对应回提问
+    bs.request_id[slot] = bs.next_request_id++;
+
+    ctx.setInputTokens(prompt);
+    ctx.copyInputTokensToGPU();
+
+    // 对 prompt 中的每个 token 获取 embedding ，并保存到 input_embeddings 中
+    embeddingGather(ctx.input_tokens, ctx.input_embeddings, weights.embed_tokens,
+                    ctx.input_token_len);
+
+    ctx.InitHiddenState();
+
+    for (int layer = 0; layer < N_LAYERS; ++layer)
     {
-        std::cerr << "No CUDA devices found\n";
-        return 1;
+        // 每层开始前的 RMSNorm：对 hidden_state 做归一化，输出到 rms_norms，供后续 QKV 投影使用
+        rmsNorm(ctx.hidden_state, ctx.normed_hidden, weights.input_layernorm[layer],
+                ctx.input_token_len);
+
+        // Q 投影计算： Q = inputs * q_proj^T
+        //   - q_proj：查询权重矩阵 (query weight)，模型参数之一，形状为 (EMBEDDING_LENGTH,
+        //   EMBEDDING_LENGTH)
+        //   - inputs：输入隐藏状态，形状为 (num_tok, EMBEDDING_LENGTH)
+        //   - Q：查询向量 (query)，注意力机制的三大投影之一，形状为 (num_tok, EMBEDDING_LENGTH)
+        ctx.qProj(weights.q_proj[layer]);
+
+        // K 投影计算：K = inputs * k_proj^T
+        //   - k_proj：键权重矩阵 (key weight)，形状为 (KV_DIM, EMBEDDING_LENGTH)
+        //         GQA/MQA 下 KV 头数少于 Q 头，故 KV_DIM < EMBEDDING_LENGTH
+        //   - inputs：输入隐藏状态，形状为 (num_tok, EMBEDDING_LENGTH)
+        //   - K：键向量，形状为 (num_tok, KV_DIM)
+        ctx.kProj(weights.k_proj[layer]);
+
+        // V 投影计算：V = inputs * v_proj^T，与 K 投影类似
+        ctx.vProj(weights.v_proj[layer]);
+
+        // RoPE
+
+        rope(ctx.query_states, ctx.input_token_len, EMBEDDING_LENGTH);
+        rope(ctx.key_states, ctx.input_token_len, KV_DIM);
+
+        // PagedAttention：将本序列 prefill 得到的 K/V 按块散射进 kv_cache。
+        // 每 BLOCK_SIZE 个 token 占一个逻辑块，共需 ceil(input_token_len / BLOCK_SIZE) 个块。
+        // block_table 是 [slot][layer][logical_block] 三维展平的页表：
+        //   slot          —— 该序列在 batch 中的席位编号
+        //   layer         —— 当前 Transformer 层
+        //   logical_block —— 序列内第几个逻辑块（= token_idx / BLOCK_SIZE）
+        // 查/分配到物理块号后，把该块内的 K、V 写入 kv_cache 中对应地址。
+        for (int token_idx = 0; token_idx < ctx.input_token_len; token_idx += BLOCK_SIZE)
+        {
+            int num_tokens_to_copy =
+                std::min(static_cast<int>(ctx.input_token_len) - token_idx, BLOCK_SIZE);
+
+            // 从页表读出该逻辑块对应的物理块号：
+            //   若为 -1，说明尚未分配，从 free_blocks 取一个空闲物理块，并写回页表同一位置；
+            //   prefill 阶段每个逻辑块都应是首次分配（-1），否则说明有残留映射，属于 bug。
+            // 拿到物理块号后，据此算出它在 kv_cache 中的地址，把 K、V 写进去。
+            int logical_block_idx = token_idx / BLOCK_SIZE;
+            int physical_block_idx = pkv.getPhysicalBlock(slot, layer, logical_block_idx);
+            if (physical_block_idx == -1)
+            {
+                physical_block_idx = pkv.getFreePhysicalBlock();
+                pkv.setPhysicalBlock(slot, layer, logical_block_idx, physical_block_idx);
+            }
+            else
+            {
+                UNREACHABLE("block must be -1 during prefill");
+            }
+
+            pkv.cacheKV(physical_block_idx, ctx.key_states, ctx.value_states, token_idx,
+                        num_tokens_to_copy);
+        }
+
+        // TODO: 并行？
+        for (int i = 0; i < NUM_Q_HEADS; ++i)
+        {
+            ctx.updateAttentionScoresHead(i);
+        }
+
+        causalMask(ctx.attn_weights, ctx.input_token_len);
+        softmax(ctx.attn_weights, ctx.input_token_len);
+
+        // TODO: 并行？
+        for (int i = 0; i < NUM_Q_HEADS; ++i)
+        {
+            ctx.updateAttentionOutputHead(i);
+        }
+
+        ctx.oProj(weights.o_proj[layer]);
+
+        // 残差连接：hidden_state += attn_output
+        // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
+        residualAdd(ctx.hidden_state, ctx.attn_output, ctx.input_token_len);
+
+        // post attention RMS Norm
+        rmsNorm(ctx.hidden_state, ctx.normed_hidden, weights.post_attn_layernorms[layer],
+                ctx.input_token_len);
+
+        ctx.swiGLU(weights.gate_proj[layer], weights.up_proj[layer], weights.down_proj[layer]);
+
+        // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
+        residualAdd(ctx.hidden_state, ctx.down, ctx.input_token_len);
     }
+    rmsNorm(ctx.hidden_state, ctx.normed_hidden, weights.norm, ctx.input_token_len);
 
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
+    ctx.lmHead(weights.embed_tokens);
 
-    std::cout << "Device: " << prop.name << "\n";
-    std::cout << "Compute capability: " << prop.major << "." << prop.minor << "\n";
-    std::cout << "Global memory: " << prop.totalGlobalMem / B_TO_MB << " MB\n";
-    std::cout << "SM count: " << prop.multiProcessorCount << "\n";
-    std::cout << "Max threads per block: " << prop.maxThreadsPerBlock << std::endl;
+    // argmax to get the output token
+    // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
+    cudaMemcpy(ctx.logits_cpu.data(), ctx.logits,
+               sizeof(__nv_bfloat16) * ctx.input_token_len * VOCAB_SIZE, cudaMemcpyDeviceToHost);
+    int last_token_offset = (ctx.input_token_len - 1) * VOCAB_SIZE;
+    float max_logit = (float) ctx.logits_cpu[last_token_offset];
+    int max_token_idx = 0;
+    for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
+    {
+        if ((float) ctx.logits_cpu[token_idx + last_token_offset] > max_logit)
+        {
+            max_logit = ctx.logits_cpu[token_idx + last_token_offset];
+            max_token_idx = token_idx;
+        }
+    }
+    // std::cout << "output token: " << max_token_idx << ", max logit: " << max_logit << std::endl;
 
-    size_t free_mem;
-    size_t total_mem;
-    cudaMemGetInfo(&free_mem, &total_mem);
-    std::cout << "Free memory: " << free_mem / B_TO_GB << "GB, total memory: " << total_mem / B_TO_GB << "GB\n";
+    bs.generated_tokens[slot].push_back(max_token_idx);
+    bs.last_generated_tokens[slot] = max_token_idx;
+    bs.current_prompt_len[slot] = ctx.input_token_len;
 
-    return 0;
+    // synchronize state of block_table with block_table_gpu
+    // TODO: do it more clever and not copy full table unnecessarily
+    cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
+               MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int), cudaMemcpyHostToDevice);
 }
 
-struct Weights
-{
-    __nv_bfloat16* embed_tokens;
-    __nv_bfloat16* input_layernorm[N_LAYERS];
-    __nv_bfloat16* mlp_gate_proj[N_LAYERS];
-    __nv_bfloat16* mlp_up_proj[N_LAYERS];
-    __nv_bfloat16* mlp_down_proj[N_LAYERS];
-    __nv_bfloat16* post_attn_layernorms[N_LAYERS];
-    __nv_bfloat16* w_k[N_LAYERS];
-    __nv_bfloat16* w_o[N_LAYERS];
-    __nv_bfloat16* w_q[N_LAYERS];
-    __nv_bfloat16* w_v[N_LAYERS];
-    __nv_bfloat16* norm;
-};
-
-int loadWeights(Weights& weights)
+int main(int argc, char* argv[])
 {
     if (checkGPUStatus() != 0)
     {
         return 1;
     }
 
-    // READ SAFETENSORS
-    std::ifstream safetensors_file("model.safetensors", std::ios_base::binary);
+    Weights weights;
 
-    if (!safetensors_file.is_open())
-    {
-        std::cout << "Can't open model.safetensors file\n";
-        safetensors_file.close();
-        return 1;
-    }
-
-    // READ SAFETENSORS HEADER SIZE
-    uint64_t header_size;
-    safetensors_file.read(reinterpret_cast<char*>(&header_size), 8);
-
-    // READ SAFETENSORS HEADER
-    string header;
-    header.resize(header_size);
-    safetensors_file.read(header.data(), header_size);
-
-    // READ OFFSETS OF EVERY LAYER (TENSOR) TO KNOW WHERE EVERY LAYER STARTS AND ENDS IN THE MEMORY
-    std::unordered_map<string, uint64_t> offsets;
-
-    json header_json = json::parse(header);
-
-    // write header
-    std::ofstream out("header.json");
-    out << header_json.dump(4) << '\n';
-
-    // max_offset tells where the model weights end in the memory
-    uint64_t max_offset = 0;
-    for (auto& [key, value] : header_json.items())
-    {
-        if (key == "__metadata__")
-        {
-            continue;
-        }
-
-        uint64_t offset_end = value["data_offsets"].at(1).get<uint64_t>();
-        if (offset_end > max_offset)
-        {
-            max_offset = offset_end;
-        }
-
-        offsets[key] = value["data_offsets"].at(0).get<uint64_t>();
-    }
-
-    char* model_weights;
-    cudaMalloc(&model_weights, max_offset);
-
-    // read model weights to CPU
-    vector<char> model_weights_cpu;
-    model_weights_cpu.resize(max_offset);
-    safetensors_file.read(model_weights_cpu.data(), max_offset);
-
-    // copy to device
-    cudaMemcpy(model_weights, model_weights_cpu.data(), max_offset, cudaMemcpyHostToDevice);
-
-    safetensors_file.close();
-
-    auto weight_offset = [&model_weights, &offsets](const string& s)
-    {
-        return (__nv_bfloat16*) (model_weights + offsets.at(s));
-    };
-
-    // BASICALLY A HELPER STRUCT TO HAVE AN EASY ACCESS TO ANY MODEL WEIGHTS ON GPU
-    weights.embed_tokens = weight_offset("model.embed_tokens.weight");
-    weights.norm = weight_offset("model.norm.weight");
-    for (int i = 0; i < N_LAYERS; ++i)
-    {
-        weights.input_layernorm[i] = weight_offset("model.layers." + std::to_string(i) + ".input_layernorm.weight");
-        weights.mlp_down_proj[i] = weight_offset("model.layers." + std::to_string(i) + ".mlp.down_proj.weight");
-        weights.mlp_gate_proj[i] = weight_offset("model.layers." + std::to_string(i) + ".mlp.gate_proj.weight");
-        weights.mlp_up_proj[i] = weight_offset("model.layers." + std::to_string(i) + ".mlp.up_proj.weight");
-        weights.post_attn_layernorms[i] =
-            weight_offset("model.layers." + std::to_string(i) + ".post_attention_layernorm.weight");
-        weights.w_k[i] = weight_offset("model.layers." + std::to_string(i) + ".self_attn.k_proj.weight");
-        weights.w_o[i] = weight_offset("model.layers." + std::to_string(i) + ".self_attn.o_proj.weight");
-        weights.w_q[i] = weight_offset("model.layers." + std::to_string(i) + ".self_attn.q_proj.weight");
-        weights.w_v[i] = weight_offset("model.layers." + std::to_string(i) + ".self_attn.v_proj.weight");
-    }
-
-    return 0;
-}
-
-void prefill(vector<int>& prompt,
-             std::queue<vector<int>>& queue,
-             int& prompt_len,
-             vector<bool>& is_slot_free,
-             int slot,
-             int* gpu_input_tokens,
-             nv_bfloat16* input_embeddings,
-             Weights& weights,
-             nv_bfloat16* hidden_state,
-             nv_bfloat16* rms_norms,
-             nv_bfloat16*& q_proj,
-             nv_bfloat16* buf_2048_1,
-             cublasHandle_t cublas_handle,
-             float& q_proj_alpha,
-             float& q_proj_beta,
-             float& k_proj_alpha,
-             float& k_proj_beta,
-             float& v_proj_alpha,
-             float& v_proj_beta,
-             nv_bfloat16* prefill_attn_scores,
-             float& attn_alpha,
-             float& attn_beta,
-             nv_bfloat16*& attn_scores_v,
-             float& attn_scores_v_alpha,
-             float& attn_scores_v_beta,
-             nv_bfloat16*& o_proj,
-             nv_bfloat16* buf_2048_2,
-             float& o_proj_alpha,
-             float& o_proj_beta,
-             float& gate_alpha,
-             float& gate_beta,
-             nv_bfloat16* gate,
-             float& up_alpha,
-             float& up_beta,
-             nv_bfloat16* up,
-             nv_bfloat16*& down,
-             float& down_alpha,
-             float& down_beta,
-             float& embed_alpha,
-             float& embed_beta,
-             nv_bfloat16* embed_proj,
-             vector<nv_bfloat16>& embed_proj_cpu,
-             vector<vector<int>>& generated_tokens,
-             vector<int>& last_generated_tokens,
-             vector<int>& current_prompt_len,
-             __nv_bfloat16* k_proj_temp_buf,
-             __nv_bfloat16* v_proj_temp_buf,
-             vector<int>& block_table,
-             int* block_table_gpu,
-             vector<int>& free_blocks,
-             __nv_bfloat16* kv_cache)
-{
-    prompt = queue.front();
-    prompt_len = prompt.size();
-    queue.pop();
-    is_slot_free[slot] = false;
-
-    cudaMemcpy(gpu_input_tokens, prompt.data(), prompt_len * sizeof(int), cudaMemcpyHostToDevice);
-    embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, prompt_len);
-
-    cudaMemcpy(hidden_state, input_embeddings, prompt_len * EMBEDDING_LENGTH * sizeof(__nv_bfloat16),
-               cudaMemcpyDeviceToDevice);
-    for (int layer = 0; layer < N_LAYERS; ++layer)
-    {
-        rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], prompt_len);
-
-        // Q = inputs * wq^T; my matrices are row-major, cublas expects column-major
-        // it perceives my matrices as transposed
-        // there's a trick where C = A * B == C^T = B^T * A^T
-        // so in my scenario cublas sees now: Q = inputs^T * wq^T^T = inputs ^T * wq
-        // so I need to do: Q^T = wq ^T * inputs
-        // the beauty is that we don't need to transpose Q^T back to Q
-        // because cublas sees the output as column-major
-        // so it's in fact transposed
-        // final dim (num_tok, EMBEDDING_LENGTH)
-        q_proj = buf_2048_1;
-        cublasStatus_t q_proj_status = cublasGemmEx(
-            cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, EMBEDDING_LENGTH, prompt_len, EMBEDDING_LENGTH, &q_proj_alpha,
-            weights.w_q[layer], CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF, EMBEDDING_LENGTH, &q_proj_beta,
-            q_proj, CUDA_R_16BF, EMBEDDING_LENGTH, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        // input = (num_tokens, EMBEDDING_LENGTH), weights = (KV_DIM, EMBEDDING_LENGTH)
-        // after trick: (KV_DIM, EMBEDDING_LENGTH) * (EMBEDDING_LENGTH, num_tokens) -> (KV_DIM, num_tokens), which
-        // really is (num_tok, KV_DIM) lda: EMBEDDING_LENGTH, ldb: EMBEDDING_LENGTH, ldc: KV_DIM
-        cublasStatus_t k_proj_status =
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, KV_DIM, prompt_len, EMBEDDING_LENGTH, &k_proj_alpha,
-                         weights.w_k[layer], CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF, EMBEDDING_LENGTH,
-                         &k_proj_beta, k_proj_temp_buf, CUDA_R_16BF, KV_DIM, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        // same as K projection
-        cublasStatus_t v_proj_status =
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, KV_DIM, prompt_len, EMBEDDING_LENGTH, &v_proj_alpha,
-                         weights.w_v[layer], CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF, EMBEDDING_LENGTH,
-                         &v_proj_beta, v_proj_temp_buf, CUDA_R_16BF, KV_DIM, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        // RoPE now
-
-        rope(q_proj, prompt_len, EMBEDDING_LENGTH);
-        rope(k_proj_temp_buf, prompt_len, KV_DIM);
-
-        // PagedAttention - scatter K and V into blocks
-        // slot - index within batch
-        // layer - index of layer
-        // ceil(prompt_len/BLOCK_SIZE) = number of blocks needed to allocate in block table
-        for (int token_idx = 0; token_idx < prompt_len; token_idx += BLOCK_SIZE)
-        {
-            int num_tokens_to_copy = prompt_len - token_idx;
-            if (num_tokens_to_copy > BLOCK_SIZE)
-            {
-                num_tokens_to_copy = BLOCK_SIZE;
-            }
-            // read index of physical block from logical block_table
-            // if -1, then need to allocate the new block
-            // pop from free_blocks
-            // write its value to block_table on the same position we read from
-            // compute address of this block table in kv_cache
-            // write tokens to it
-            int block_idx = token_idx / BLOCK_SIZE;
-            int block = block_table[slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + block_idx];
-            if (block == -1)
-            {
-                int physical_block_idx = free_blocks.back();
-                free_blocks.pop_back();
-                block = physical_block_idx;
-                block_table[slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + block_idx] = block;
-            }
-            else
-            {
-                assert(false && "block must be -1 during prefill - what happened?");
-                // probably in prefill this doesn't make a lot of sense? but will matter in decode
-            }
-
-            // store K
-            __nv_bfloat16* k_cache_ptr = (__nv_bfloat16*) ((char*) kv_cache + block * BLOCK_BYTES);
-            __nv_bfloat16* k_proj_ptr = k_proj_temp_buf + token_idx * KV_DIM;
-            cudaMemcpy(k_cache_ptr, k_proj_ptr, num_tokens_to_copy * KV_DIM * sizeof(__nv_bfloat16),
-                       cudaMemcpyDeviceToDevice);
-
-            // store V
-            __nv_bfloat16* v_cache_ptr = (__nv_bfloat16*) ((char*) kv_cache + block * BLOCK_BYTES + V_OFFSET);
-            __nv_bfloat16* v_proj_ptr = v_proj_temp_buf + token_idx * KV_DIM;
-            cudaMemcpy(v_cache_ptr, v_proj_ptr, num_tokens_to_copy * KV_DIM * sizeof(__nv_bfloat16),
-                       cudaMemcpyDeviceToDevice);
-        }
-
-        // attention scores
-        // per head, 64 elements each
-        // so total 32 heads
-        // Q (num_tok, 2048)
-        // K (num_tok, 512)
-        // GQA grouping reuses 1 K head per 4 consecutive Q heads
-        // Q_head (num_tok, 64)
-        // K_head (num_tok, 64)
-        // attn_score_head = Q_head * K_head^T / sqrt(64)
-        // so: head output dims (num_tok, num_tok)
-        // total output (32, num_tok, num_tok)
-        for (int i = 0; i < NUM_Q_HEADS; ++i)
-        {
-            int k_head_idx = i / GQA_Q_TO_K_RATIO;
-            __nv_bfloat16* q_head = q_proj + i * HEAD_DIM;
-            __nv_bfloat16* k_head = k_proj_temp_buf + k_head_idx * HEAD_DIM;
-            __nv_bfloat16* attn_score_head = prefill_attn_scores + prompt_len * prompt_len * i;
-
-            cublasStatus_t attn_score_status =
-                cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, prompt_len, prompt_len, HEAD_DIM, &attn_alpha,
-                             k_head, CUDA_R_16BF, KV_DIM, q_head, CUDA_R_16BF, EMBEDDING_LENGTH, &attn_beta,
-                             attn_score_head, CUDA_R_16BF, prompt_len, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-        }
-
-        causalMask(prefill_attn_scores, prompt_len);
-
-        softmax(prefill_attn_scores, prompt_len);
-
-        // attn scores * V
-        // (32, num_tok, num_tok) * (num_tok, 512)
-        // GQA - 4 Q heads share 1 V head
-        // attn_scores dim (32, num_tok, num_tok)
-        // attn_scores head dim (num_tok, num_tok)
-        // V dim (num_tok, 512)
-        // NUM_V_HEADS is 8 -> 512 / 8 = 64
-        // V_head dim (num_tok, 64)
-        // output head dim: scores head * V head -> (num_tok, num_tok) * (num_tok, 64) = (num_tok, 64)
-        // in total 32 output heads: so (num_tok, 64 * 32) = (num_tok, 2048)
-        attn_scores_v = buf_2048_1;
-        for (int i = 0; i < NUM_Q_HEADS; ++i)
-        {
-            int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
-            // i * prompt_under_prefill.size() * prompt_under_prefill.size(),  because attn scores is (32, num_tok,
-            // num_tok)
-            __nv_bfloat16* attn_scores_head = prefill_attn_scores + i * prompt_len * prompt_len;
-            __nv_bfloat16* v_head = v_proj_temp_buf + v_head_idx * HEAD_DIM;
-            __nv_bfloat16* output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
-
-            cublasStatus_t attn_score_status = cublasGemmEx(
-                cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, HEAD_DIM, prompt_len, prompt_len, &attn_scores_v_alpha, v_head,
-                CUDA_R_16BF, KV_DIM, attn_scores_head, CUDA_R_16BF, prompt_len, &attn_scores_v_beta,
-                output_attn_scores_head, CUDA_R_16BF, EMBEDDING_LENGTH, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-        }
-
-        // output projection, it will be an input for MLP blocks
-        // attn_scores_v * w_o^T
-        // (num_tok, 2048) * (2048, 2048) -> (num_tok, 2048)
-        // same as Q projection, so copy paste
-        o_proj = buf_2048_2;
-        cublasStatus_t o_proj_status = cublasGemmEx(
-            cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, EMBEDDING_LENGTH, prompt_len, EMBEDDING_LENGTH, &o_proj_alpha,
-            weights.w_o[layer], CUDA_R_16BF, EMBEDDING_LENGTH, attn_scores_v, CUDA_R_16BF, EMBEDDING_LENGTH,
-            &o_proj_beta, o_proj, CUDA_R_16BF, EMBEDDING_LENGTH, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-        residualAdd(hidden_state, o_proj, prompt_len);
-        // post attention RMS Norm
-        rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], prompt_len);
-
-        // SwiGLU time - just MLP + SiLU
-        // gate = hidden_state (rms-normed) * mlp_gate_proj ^ T
-        // HIDDEN_DIM = 8192
-        // (num_tok, 2048) * (2048, 8192) -> (num_tok, 8192)
-        // my data is row major so transpose trick
-        // gate ^T = (mlp_gate_proj ^ T)^T * hidden_state^T
-        // gate ^T = mlp_gate_proj * hidden_state^T
-        // (num_tok, 8192)^T = (8192, 2048) * (2048, num_tok)
-        // but data is perceived as column major so I need to transpose mlp_gate_proj
-        // to make it work
-        // m 8192 n num_tok k 2048 lda 2048 ldb 2048 ldc 8192
-        cublasStatus_t gate_status = cublasGemmEx(
-            cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, HIDDEN_DIM, prompt_len, EMBEDDING_LENGTH, &gate_alpha,
-            weights.mlp_gate_proj[layer], CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF, EMBEDDING_LENGTH,
-            &gate_beta, gate, CUDA_R_16BF, HIDDEN_DIM, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        // up, the same dims as gate
-        cublasStatus_t up_status = cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, HIDDEN_DIM, prompt_len,
-                                                EMBEDDING_LENGTH, &up_alpha, weights.mlp_up_proj[layer], CUDA_R_16BF,
-                                                EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF, EMBEDDING_LENGTH, &up_beta,
-                                                up, CUDA_R_16BF, HIDDEN_DIM, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        // SiLU
-        // after_silu = SiLU(gate) * up (element-wise multication)
-        // after_silu = gate * (1 / (1 + e^(-gate))) * up
-        // gate is dim (num_tok, 8192), up too
-        silu(gate, up, prompt_len); // gate = after_silu now
-
-        // down projection
-        // output = post-silu * down_proj^T
-        // dims: (num_tok, 8192) * (2048, 8192) ^ T = (num_tok, 8192) * (8192, 2048) = (num_tok, 2048)
-        // output^T = (down_proj^T)^T * post-silu^T
-        // output^T = down_proj * post-silu^T
-        // cublas sees them already as transposed so only down_proj I need to transpose
-        // dims = (2048, 8192) * (8192, num_tok) = (2048, num_tok)
-        // m: 2048 n: num_tok, k: 8192
-        // lda: 8192, ldb: 8192, ldc: 2048
-        down = buf_2048_2;
-        cublasStatus_t down_status =
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, EMBEDDING_LENGTH, prompt_len, HIDDEN_DIM, &down_alpha,
-                         weights.mlp_down_proj[layer], CUDA_R_16BF, HIDDEN_DIM, gate, CUDA_R_16BF, HIDDEN_DIM,
-                         &down_beta, down, CUDA_R_16BF, EMBEDDING_LENGTH, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-        residualAdd(hidden_state, down, prompt_len);
-    }
-    rmsNorm(hidden_state, rms_norms, weights.norm, prompt_len);
-
-    // logits = rms_norms * weights.embed_tokens^T
-    // dim rms_norms: (num_tok, 2048), dim embed_tokens: (128256, 2048)
-    // logits dim = (num_tok, 2048) * (2048, 128256) = (num_tok, 128256) => m = num_tok, n = 128256, k = 2048
-    // I leave this comment above because it shows a bug in my thinking
-    // because I use the cublas trick, logits are transposed so m and n should be swapped
-    // so m 128256, n num_tok
-    // data is row major so we treat it as transposed and use the trick
-    // logits^T = ((weights.embed_tokens^T)^T * rms_norms^T
-    // logits^T = weights.embed_tokens * rms_norms^T
-    // so we need to transpose embed_tokens, because rms_norms already
-    // appears to cublas as transposed
-    // lda = 2048, ldb = 2048, ldc = 128256
-
-    cublasStatus_t embed_status =
-        cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, VOCAB_SIZE, prompt_len, EMBEDDING_LENGTH, &embed_alpha,
-                     weights.embed_tokens, CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF, EMBEDDING_LENGTH,
-                     &embed_beta, embed_proj, CUDA_R_16BF, VOCAB_SIZE, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-    cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * prompt_len * VOCAB_SIZE,
-               cudaMemcpyDeviceToHost);
-    // argmax to get the output token
-    // TODO: write a proper kernel for it
-    // for now just a simple CPU function
-    int last_token_offset = (prompt_len - 1) * VOCAB_SIZE;
-    float max_token = (float) embed_proj_cpu[last_token_offset];
-    int max_token_idx = 0;
-    for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
-    {
-        if ((float) embed_proj_cpu[token_idx + last_token_offset] > max_token)
-        {
-            max_token = embed_proj_cpu[token_idx + last_token_offset];
-            max_token_idx = token_idx;
-        }
-    }
-    std::cout << "Output token: " << (float) max_token << ", token index: " << std::to_string(max_token_idx)
-              << std::endl;
-
-    generated_tokens[slot].push_back(max_token_idx);
-    last_generated_tokens[slot] = max_token_idx;
-    current_prompt_len[slot] = prompt_len;
-
-    // synchronize state of block_table with block_table_gpu
-    // TODO: do it more clever and not copy full table unnecessarily
-    cudaMemcpy(block_table_gpu, block_table.data(), MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
-               cudaMemcpyHostToDevice);
-}
-
-int main(int argc, char* argv[])
-{
-    cublasHandle_t cublas_handle;
-    cublasStatus_t status = cublasCreate(&cublas_handle);
-    if (status != CUBLAS_STATUS_SUCCESS)
-    {
-        std::cerr << "cuBLAS init failed, status: " << status << "\n";
-        return 1;
-    }
-
-    Weights weights{};
-    if (loadWeights(weights) != 0)
-    {
-        return 1;
-    }
-
-    // allocator for pagedattn
-    __nv_bfloat16* kv_cache;
-    cudaMalloc(&kv_cache, KV_CACHE_SIZE_BYTES);
-    vector<int> free_blocks(NUM_BLOCKS);
-    std::iota(free_blocks.begin(), free_blocks.end(), 0);
-    vector<int> block_table(MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ, -1);
-    int* block_table_gpu;
-    cudaMalloc(&block_table_gpu, MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int));
-
+    // TODO: 改为可输入
     // PROMPT 0 (What is 2+2?) - length 17
-    std::queue<vector<int>> queue;
-    queue.push({128000, 128006, 882, 128007, 271, 3923, 374, 220, 17, 10, 17, 30, 128009, 128006, 78191, 128007, 271});
+    std::queue<vector<int>> prompt_queue;
+    prompt_queue.push({128000, 128006, 882, 128007, 271, 3923, 374, 220, 17, 10, 17, 30, 128009,
+                       128006, 78191, 128007, 271});
 
     // PROMPT 1 (Name a color.) - length 14
-    queue.push({128000, 128006, 882, 128007, 271, 678, 264, 1933, 13, 128009, 128006, 78191, 128007, 271});
+    prompt_queue.push(
+        {128000, 128006, 882, 128007, 271, 678, 264, 1933, 13, 128009, 128006, 78191, 128007, 271});
 
     // PROMPT 2 (Say hello.) - length 13
-    queue.push({128000, 128006, 882, 128007, 271, 46864, 24748, 13, 128009, 128006, 78191, 128007, 271});
+    prompt_queue.push(
+        {128000, 128006, 882, 128007, 271, 46864, 24748, 13, 128009, 128006, 78191, 128007, 271});
 
     // PROMPT 3 (Capital of France?) - length 14
-    queue.push({128000, 128006, 882, 128007, 271, 64693, 315, 9822, 30, 128009, 128006, 78191, 128007, 271});
+    prompt_queue.push({128000, 128006, 882, 128007, 271, 64693, 315, 9822, 30, 128009, 128006,
+                       78191, 128007, 271});
 
-    // BATCH
-    vector<bool> is_slot_free(BATCH_SIZE, true); // set to false when slot taken, set to true when free
+    BatchState bs;
+    PagedKVCache pkv;
+    InferenceContext ctx;
 
-    vector<vector<int>> generated_tokens(BATCH_SIZE);
-    vector<int> last_generated_tokens(BATCH_SIZE);
-    vector<int> current_prompt_len(BATCH_SIZE, 0);
+    // DECODE 阶段：每步只处理 1 个新 token。
+    // 逐 token 的激活缓冲（hidden、Q、normed、gate、up 等）都只用 index 0（当前这一个 token）；
+    // 唯独新算出的 K、V 要写到该 token 在序列中的真实位置（current_position_token），
+    // 追加进 paged KV cache，供注意力从位置 0 读到当前位置。
 
-    // needed to provide contiguous data for decode
-    vector<int> active_slots;
-    vector<int> active_tokens;
-
-    int* gpu_active_slots;
-    cudaMalloc(&gpu_active_slots, BATCH_SIZE * sizeof(int));
-    int* gpu_seq_lens;
-    cudaMalloc(&gpu_seq_lens, BATCH_SIZE * sizeof(int));
-
-    // TODO: recalculate input_tokens_size and prompt_lengths always when there is a change to prompt_under_prefill
-    // TODO: right now I handle input manually, it's the least interesting part, will come back to it when continuous
-    // batching and pagedattn works
-
-    vector<int> prompt;
-    int prompt_len;
-    int* gpu_input_tokens;
-    cudaMalloc(&gpu_input_tokens, MAX_PROMPT_LEN * sizeof(int));
-    __nv_bfloat16* input_embeddings;
-    cudaMalloc(&input_embeddings, MAX_PROMPT_LEN * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-
-    __nv_bfloat16* hidden_state;
-    cudaMalloc(&hidden_state, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-
-    __nv_bfloat16* rms_norms;
-    cudaMalloc(&rms_norms, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-
-    __nv_bfloat16* buf_2048_1; // shared between q_proj and attn_scores_v
-    cudaMalloc(&buf_2048_1, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-    __nv_bfloat16* q_proj;
-    float q_proj_alpha = 1.0f;
-    float q_proj_beta = 0.0f;
-
-    // K and V cache
-    __nv_bfloat16* k_proj_temp_buf;
-    cudaMalloc(&k_proj_temp_buf, MAX_PROMPT_LEN * KV_DIM * sizeof(__nv_bfloat16));
-
-    __nv_bfloat16* v_proj_temp_buf;
-    cudaMalloc(&v_proj_temp_buf, MAX_PROMPT_LEN * KV_DIM * sizeof(__nv_bfloat16));
-
-    float k_proj_alpha = 1.0f;
-    float k_proj_beta = 0.0f;
-
-    float v_proj_alpha = 1.0f;
-    float v_proj_beta = 0.0f;
-
-    __nv_bfloat16* prefill_attn_scores;
-    cudaMalloc(&prefill_attn_scores, MAX_PROMPT_LEN * MAX_PROMPT_LEN * sizeof(__nv_bfloat16) * NUM_Q_HEADS);
-    float attn_alpha = 1.0f / 8.0f;
-    float attn_beta = 0.0f;
-
-    __nv_bfloat16* attn_scores_v;
-    float attn_scores_v_alpha = 1.0f;
-    float attn_scores_v_beta = 0.0f;
-
-    __nv_bfloat16* buf_2048_2; // shared between o_proj and down
-    cudaMalloc(&buf_2048_2, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-    __nv_bfloat16* o_proj;
-    float o_proj_alpha = 1.0f;
-    float o_proj_beta = 0.0f;
-
-    __nv_bfloat16* gate;
-    cudaMalloc(&gate, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * HIDDEN_DIM);
-    float gate_alpha = 1.0f;
-    float gate_beta = 0.0f;
-
-    __nv_bfloat16* up;
-    cudaMalloc(&up, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * HIDDEN_DIM);
-    float up_alpha = 1.0f;
-    float up_beta = 0.0f;
-
-    __nv_bfloat16* down;
-    float down_alpha = 1.0f;
-    float down_beta = 0.0f;
-
-    __nv_bfloat16* embed_proj;
-    cudaMalloc(&embed_proj, sizeof(__nv_bfloat16) * MAX_BUFFER_SIZE * VOCAB_SIZE);
-    float embed_alpha = 1.0f;
-    float embed_beta = 0.0f;
-
-    vector<__nv_bfloat16> embed_proj_cpu;
-    embed_proj_cpu.resize(MAX_BUFFER_SIZE * VOCAB_SIZE);
-    // decode-only allocation
-    int* gpu_last_tokens;
-    cudaMalloc(&gpu_last_tokens, BATCH_SIZE * sizeof(int));
-    // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
-
-    // reused temporary buffers for K and V cache computation during decode
-    __nv_bfloat16* k_proj_batched_buffer;
-    cudaMalloc(&k_proj_batched_buffer, BATCH_SIZE * sizeof(__nv_bfloat16) * KV_DIM);
-
-    __nv_bfloat16* v_proj_batched_buffer;
-    cudaMalloc(&v_proj_batched_buffer, BATCH_SIZE * sizeof(__nv_bfloat16) * KV_DIM);
-
-    for (int slot = 0; slot < is_slot_free.size() && !queue.empty(); ++slot)
+    while (true)
     {
-        if (!is_slot_free[slot])
-        {
-            continue; // slot taken, skip
-        }
-        prefill(prompt, queue, prompt_len, is_slot_free, slot, gpu_input_tokens, input_embeddings, weights,
-                hidden_state, rms_norms, q_proj, buf_2048_1, cublas_handle, q_proj_alpha, q_proj_beta, k_proj_alpha,
-                k_proj_beta, v_proj_alpha, v_proj_beta, prefill_attn_scores, attn_alpha, attn_beta, attn_scores_v,
-                attn_scores_v_alpha, attn_scores_v_beta, o_proj, buf_2048_2, o_proj_alpha, o_proj_beta, gate_alpha,
-                gate_beta, gate, up_alpha, up_beta, up, down, down_alpha, down_beta, embed_alpha, embed_beta,
-                embed_proj, embed_proj_cpu, generated_tokens, last_generated_tokens, current_prompt_len,
-                k_proj_temp_buf, v_proj_temp_buf, block_table, block_table_gpu, free_blocks, kv_cache);
+        bs.active_slots.clear();
+        bs.active_tokens.clear();
 
-        // // after prefill:
-        // int first_token = -1; // TODO just a stub
-        // last_generated_tokens[slot] = first_token;
-        // current_prompt_len[slot] = prompt.size();
-        // generated_tokens[slot].push_back(first_token);
-    }
-
-    // INFERENCE STARTS HERE! =]
-    // I have the same amount of embeddings as input tokens
-    // it's just every embedding is EMBEDDING_LENGTH length bf16 vector
-    // retrieved from model weights based on token's value
-
-    // PREFILL
-
-    // DECODE
-    // since now I operate always on index 0 for all values and for current_position_token for new K and V
-
-    while (
-        true) // exit condition irrelevant for now, since it's an inference server that's supposed to run foreveeer!!!
-    {
-        active_slots.clear();
-        active_tokens.clear();
         for (int slot = 0; slot < BATCH_SIZE; ++slot)
         {
-            if (is_slot_free[slot])
+            if (bs.is_slot_free[slot])
             {
-                if (queue.empty())
+                if (prompt_queue.empty())
                 {
                     continue;
                 }
-                generated_tokens[slot].clear();
-                prefill(prompt, queue, prompt_len, is_slot_free, slot, gpu_input_tokens, input_embeddings, weights,
-                        hidden_state, rms_norms, q_proj, buf_2048_1, cublas_handle, q_proj_alpha, q_proj_beta,
-                        k_proj_alpha, k_proj_beta, v_proj_alpha, v_proj_beta, prefill_attn_scores, attn_alpha,
-                        attn_beta, attn_scores_v, attn_scores_v_alpha, attn_scores_v_beta, o_proj, buf_2048_2,
-                        o_proj_alpha, o_proj_beta, gate_alpha, gate_beta, gate, up_alpha, up_beta, up, down, down_alpha,
-                        down_beta, embed_alpha, embed_beta, embed_proj, embed_proj_cpu, generated_tokens,
-                        last_generated_tokens, current_prompt_len, k_proj_temp_buf, v_proj_temp_buf, block_table,
-                        block_table_gpu, free_blocks, kv_cache);
+                bs.generated_tokens[slot].clear();
+                prefill(prompt_queue, slot, ctx, pkv, bs, weights);
             }
-            active_slots.push_back(slot);
-            active_tokens.push_back(last_generated_tokens[slot]);
+            bs.active_slots.push_back(slot);
+            bs.active_tokens.push_back(bs.last_generated_tokens[slot]);
         }
-        int num_active_slots = active_slots.size();
+        int num_active_slots = bs.active_slots.size();
         if (num_active_slots == 0)
         {
-            if (queue.empty())
+            if (prompt_queue.empty())
             {
-                break; // TODO: continue will make sense when I will finally write to queue, for now it has predefined
-                       // size so break instead
+                break;
             }
             continue;
         }
 
         // copy useful data to gpu
-        cudaMemcpy(gpu_last_tokens, active_tokens.data(), num_active_slots * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(gpu_active_slots, active_slots.data(), num_active_slots * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(ctx.last_tokens, bs.active_tokens.data(), num_active_slots * sizeof(int),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(ctx.active_slots, bs.active_slots.data(), num_active_slots * sizeof(int),
+                   cudaMemcpyHostToDevice);
+
         vector<int> seq_lens(num_active_slots);
+
         for (int slot = 0; slot < num_active_slots; ++slot)
         {
-            int active_slot = active_slots[slot];
-            seq_lens[slot] = current_prompt_len[active_slot] + 1;
+            int active_slot = bs.active_slots[slot];
+            seq_lens[slot] = bs.current_prompt_len[active_slot] + 1;
         }
-        cudaMemcpy(gpu_seq_lens, seq_lens.data(), seq_lens.size() * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(ctx.seq_lens, seq_lens.data(), seq_lens.size() * sizeof(int),
+                   cudaMemcpyHostToDevice);
 
-        embeddingGatherDecode(gpu_last_tokens, num_active_slots, hidden_state, weights.embed_tokens);
+        embeddingGatherDecode(ctx.last_tokens, num_active_slots, ctx.hidden_state,
+                              weights.embed_tokens);
+
+        // decode 每步处理 num_active_slots 行（每个活跃序列 1 个 token）
+        ctx.num_rows = num_active_slots;
+
         for (int layer = 0; layer < N_LAYERS; ++layer)
         {
-            rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], num_active_slots);
-            q_proj = buf_2048_1;
-            // q proj (num_prompts, 2048)
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                         EMBEDDING_LENGTH, // m
-                         num_active_slots, // n
-                         EMBEDDING_LENGTH, // k
-                         &q_proj_alpha,
-                         weights.w_q[layer], // A
-                         CUDA_R_16BF,
-                         EMBEDDING_LENGTH, // lda
-                         rms_norms,        // B
-                         CUDA_R_16BF,
-                         EMBEDDING_LENGTH, // ldb
-                         &q_proj_beta,
-                         q_proj, // C
-                         CUDA_R_16BF,
-                         EMBEDDING_LENGTH, // ldc
-                         CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-            // k proj (1, 512), writing output to next position in current layer's K cache
-            // K proj = rms_norms (num_prompt, 2048) * W_k (512, 2048)
-            // W_k is actually stored as 512, 2048 (out features, in features)
-            // so that's why we need to transpose it
-            // all the data is stored in row major and cublas reads it as column major
-            // so all the data appears as transposed
-            // so data actually apppears as (2048, num_prompt) * (2048, 512)
-            // the output of matmul will also be produced as transposed, so we can say that
-            // in our mental model we talk about K_proj^T
-            // and to get K_proj^T we can do transposition trick and write the cublas call as
-            // W_k^T * rms_nroms
-            // so we end up with: K_proj^T = W_k^T (512, 2048) * rms_norms (2048, num_prompt)
-            // result dim is K_proj^T = (512, num_prompt)
-            // but it's transposed, so in fact we get correct output dimension (num_prompt, 512)
-            // it was great for num_prompt=1, but the problem is that prompts have different length
-            // that's why we have vector of current_prompt_len, but also we can't write to K_proj
-            // directly, so I write to temp buffer kv_proj_batched_buffer and the scatter
-            // output to K_proj in a loop
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                         KV_DIM,           // m = 512
-                         num_active_slots, // n = num prompts
-                         EMBEDDING_LENGTH, // k = 2048
-                         &k_proj_alpha,
-                         weights.w_k[layer], // A
-                         CUDA_R_16BF,
-                         EMBEDDING_LENGTH, // lda 2048, because W_k is in memory as 512, 2048
-                         // so the gap between subsequent elements is 2048
-                         rms_norms, // B
-                         CUDA_R_16BF,
-                         EMBEDDING_LENGTH, // ldb, same reason for rms_norms
-                         &k_proj_beta,
-                         k_proj_batched_buffer, // TODO C
-                         CUDA_R_16BF,
-                         KV_DIM, // ldc = 512
-                         CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+            rmsNorm(ctx.hidden_state, ctx.normed_hidden, weights.input_layernorm[layer],
+                    num_active_slots);
 
-            // same
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, KV_DIM, num_active_slots, EMBEDDING_LENGTH,
-                         &v_proj_alpha, weights.w_v[layer], CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF,
-                         EMBEDDING_LENGTH, &v_proj_beta, v_proj_batched_buffer, CUDA_R_16BF, KV_DIM, CUBLAS_COMPUTE_32F,
-                         CUBLAS_GEMM_DEFAULT);
+            ctx.qProj(weights.q_proj[layer]);
+            ctx.kProj(weights.k_proj[layer]);
+            ctx.vProj(weights.v_proj[layer]);
 
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
-                int active_slot = active_slots[slot];
-                ropeDecode(&q_proj[slot * EMBEDDING_LENGTH], current_prompt_len[active_slot], EMBEDDING_LENGTH);
-                ropeDecode(k_proj_batched_buffer + slot * KV_DIM, current_prompt_len[active_slot], KV_DIM);
+                int active_slot = bs.active_slots[slot];
+                ropeDecode(&ctx.query_states[slot * EMBEDDING_LENGTH],
+                           bs.current_prompt_len[active_slot], EMBEDDING_LENGTH);
+                ropeDecode(ctx.key_states + slot * KV_DIM, bs.current_prompt_len[active_slot],
+                           KV_DIM);
             }
 
-            // PagedAttn scatter k and v from a temp buffer, like in the prefill
+            // PagedAttention：把每个活跃序列这一步的新 K/V 散射进各自 KV cache 的下一个位置
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
-                int active_slot = active_slots[slot];
-                int seq_len = current_prompt_len[active_slot]; // + generated tokens?
+                int active_slot = bs.active_slots[slot];
+                // 新 token 在序列中的位置：current_prompt_len 每步 decode 已递增，即为写入位置
+                // （与上面 RoPE、seq_lens 的位置口径一致）
+                int seq_len = bs.current_prompt_len[active_slot];
                 int logical_block_idx = seq_len / BLOCK_SIZE;
                 int token_in_block_idx = seq_len % BLOCK_SIZE;
-                int block = block_table[active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ +
-                                        logical_block_idx];
-                if (token_in_block_idx == 0)
-                {
-                    int physical_block_idx = free_blocks.back();
-                    free_blocks.pop_back();
-                    block = physical_block_idx;
-                    block_table[active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ +
-                                logical_block_idx] = block;
-                }
-                __nv_bfloat16* k_cache_ptr = (__nv_bfloat16*) ((char*) kv_cache + block * BLOCK_BYTES +
-                                                               token_in_block_idx * KV_DIM * sizeof(__nv_bfloat16));
-                __nv_bfloat16* k_proj_ptr = k_proj_batched_buffer + slot * KV_DIM;
-                cudaMemcpy(k_cache_ptr, k_proj_ptr, KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
 
-                __nv_bfloat16* v_cache_ptr = (__nv_bfloat16*) ((char*) kv_cache + block * BLOCK_BYTES + V_OFFSET +
-                                                               token_in_block_idx * KV_DIM * sizeof(__nv_bfloat16));
-                __nv_bfloat16* v_proj_ptr = v_proj_batched_buffer + slot * KV_DIM;
-                cudaMemcpy(v_cache_ptr, v_proj_ptr, KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
+                // 逻辑块首次触及（token_in_block==0 → 页表为 -1）时分配新物理块
+                int physical_block_idx =
+                    pkv.getPhysicalBlock(active_slot, layer, logical_block_idx);
+                if (physical_block_idx == -1)
+                {
+                    physical_block_idx = pkv.getFreePhysicalBlock();
+                    pkv.setPhysicalBlock(active_slot, layer, logical_block_idx, physical_block_idx);
+                }
+
+                // 该 slot 的新 token K/V（已 RoPE，位于 ctx.key/value_states 第 slot
+                // 行）写入块内位置
+                pkv.cacheKV(physical_block_idx, ctx.key_states, ctx.value_states, slot, 1,
+                            token_in_block_idx);
             }
 
             // synchronize block table on cpu with block table on gpu (for attention)
-            cudaMemcpy(block_table_gpu, block_table.data(), MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
+            cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
+                       MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
                        cudaMemcpyHostToDevice);
 
-            pagedAttention(layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots,
-                           buf_2048_1);
+            // 注意力输出写入 ctx.context（= scratch_a），供 oProj 读取
+            ctx.context = ctx.scratch_a;
+            pagedAttention(layer, num_active_slots, ctx.query_states, pkv.kv_cache,
+                           pkv.block_table_gpu, ctx.seq_lens, ctx.active_slots, ctx.context);
 
-            o_proj = buf_2048_2;
-            // (1, 2048) * (2048, 2048) -> (1, 2048)
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                         EMBEDDING_LENGTH, // m
-                         num_active_slots, // n
-                         EMBEDDING_LENGTH, // k
-                         &o_proj_alpha, weights.w_o[layer], CUDA_R_16BF, EMBEDDING_LENGTH, buf_2048_1, CUDA_R_16BF,
-                         EMBEDDING_LENGTH, &o_proj_beta, o_proj, CUDA_R_16BF, EMBEDDING_LENGTH, CUBLAS_COMPUTE_32F,
-                         CUBLAS_GEMM_DEFAULT);
+            ctx.oProj(weights.o_proj[layer]);
 
-            residualAdd(hidden_state, o_proj, num_active_slots);
+            residualAdd(ctx.hidden_state, ctx.attn_output, num_active_slots);
 
-            rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], num_active_slots);
+            rmsNorm(ctx.hidden_state, ctx.normed_hidden, weights.post_attn_layernorms[layer],
+                    num_active_slots);
 
-            // MLP
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                         HIDDEN_DIM,       // m
-                         num_active_slots, // n
-                         EMBEDDING_LENGTH, // k
-                         &gate_alpha, weights.mlp_gate_proj[layer], CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms,
-                         CUDA_R_16BF, EMBEDDING_LENGTH, &gate_beta, gate, CUDA_R_16BF, HIDDEN_DIM, CUBLAS_COMPUTE_32F,
-                         CUBLAS_GEMM_DEFAULT);
+            ctx.swiGLU(weights.gate_proj[layer], weights.up_proj[layer], weights.down_proj[layer]);
 
-            // (1, 2048) * (2048, 8192) -> (1, 8192)
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                         HIDDEN_DIM,       // m
-                         num_active_slots, // n
-                         EMBEDDING_LENGTH, // k
-                         &up_alpha, weights.mlp_up_proj[layer], CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF,
-                         EMBEDDING_LENGTH, &up_beta, up, CUDA_R_16BF, HIDDEN_DIM, CUBLAS_COMPUTE_32F,
-                         CUBLAS_GEMM_DEFAULT);
-
-            silu(gate, up, num_active_slots);
-
-            down = buf_2048_2;
-            cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                         EMBEDDING_LENGTH, // m
-                         num_active_slots, // n
-                         HIDDEN_DIM,       // k
-                         &down_alpha, weights.mlp_down_proj[layer], CUDA_R_16BF, HIDDEN_DIM, gate, CUDA_R_16BF,
-                         HIDDEN_DIM, &down_beta, down, CUDA_R_16BF, EMBEDDING_LENGTH, CUBLAS_COMPUTE_32F,
-                         CUBLAS_GEMM_DEFAULT);
-
-            residualAdd(hidden_state, down, num_active_slots);
+            residualAdd(ctx.hidden_state, ctx.down, num_active_slots);
         }
 
-        rmsNorm(hidden_state, rms_norms, weights.norm, num_active_slots);
+        rmsNorm(ctx.hidden_state, ctx.normed_hidden, weights.norm, num_active_slots);
 
-        cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                     VOCAB_SIZE,       // m
-                     num_active_slots, // n
-                     EMBEDDING_LENGTH, // k
-                     &embed_alpha, weights.embed_tokens, CUDA_R_16BF, EMBEDDING_LENGTH, rms_norms, CUDA_R_16BF,
-                     EMBEDDING_LENGTH, &embed_beta, embed_proj, CUDA_R_16BF, VOCAB_SIZE, CUBLAS_COMPUTE_32F,
-                     CUBLAS_GEMM_DEFAULT);
+        ctx.lmHead(weights.embed_tokens);
 
-        cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * num_active_slots * VOCAB_SIZE,
-                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(ctx.logits_cpu.data(), ctx.logits,
+                   sizeof(nv_bfloat16) * num_active_slots * VOCAB_SIZE, cudaMemcpyDeviceToHost);
 
-        float max_token = 0.0;
+        float max_logit = 0.0;
         int max_token_idx = 0;
         for (int slot = 0; slot < num_active_slots; ++slot)
         {
-            int active_slot = active_slots[slot];
-            max_token =
-                (float) embed_proj_cpu[slot * VOCAB_SIZE]; // TODO: verify if float is good enough in place of nvbf16
+            int active_slot = bs.active_slots[slot];
+            max_logit = (float) ctx.logits_cpu[slot * VOCAB_SIZE];
             max_token_idx = 0;
             for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
             {
-                if ((float) embed_proj_cpu[slot * VOCAB_SIZE + token_idx] > max_token)
+                if ((float) ctx.logits_cpu[slot * VOCAB_SIZE + token_idx] > max_logit)
                 {
-                    max_token = embed_proj_cpu[slot * VOCAB_SIZE + token_idx];
+                    max_logit = (float) ctx.logits_cpu[slot * VOCAB_SIZE + token_idx];
                     max_token_idx = token_idx;
                 }
             }
-            // TODO: wrap with #ifdef DEBUG
-            std::cout << "Output token: " << (float) max_token << ", token index: " << std::to_string(max_token_idx)
-                      << std::endl;
+
             if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID ||
-                current_prompt_len[active_slot] == MAX_SEQ_LEN - 1)
+                bs.current_prompt_len[active_slot] == MAX_SEQ_LEN - 1)
             {
-                is_slot_free[active_slot] = true;
+                // 序列结束：打印该请求的完整生成序列（可丢给 tokenizer.py --decode --ids ... 看文字）
+                std::cout << "=== request " << bs.request_id[active_slot]
+                          << ": ";
+                
+                for (int t : bs.generated_tokens[active_slot])
+                {
+                    std::cout << t << " ";
+                }
+                std::cout << std::endl;
+
+                bs.is_slot_free[active_slot] = true;
                 for (int layer = 0; layer < N_LAYERS; ++layer)
                 {
-                    for (int logical_block_idx = 0; logical_block_idx < MAX_BLOCKS_PER_SEQ; ++logical_block_idx)
+                    for (int logical_block_idx = 0; logical_block_idx < MAX_BLOCKS_PER_SEQ;
+                         ++logical_block_idx)
                     {
-                        int block_idx = active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ +
-                                        logical_block_idx;
-                        if (block_table[block_idx] != -1)
+                        int block_idx = active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ +
+                                        layer * MAX_BLOCKS_PER_SEQ + logical_block_idx;
+                        if (pkv.block_table[block_idx] != -1)
                         {
-                            free_blocks.push_back(block_table[block_idx]);
-                            block_table[block_idx] = -1;
+                            pkv.free_blocks.push_back(pkv.block_table[block_idx]);
+                            pkv.block_table[block_idx] = -1;
                         }
                     }
                 }
-                cudaMemcpy(block_table_gpu, block_table.data(),
-                           MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int), cudaMemcpyHostToDevice);
+                cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
+                           MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
+                           cudaMemcpyHostToDevice);
             }
             else
             {
-                last_generated_tokens[active_slot] = max_token_idx;
-                generated_tokens[active_slot].push_back(max_token_idx);
-                current_prompt_len[active_slot] = current_prompt_len[active_slot] + 1;
+                bs.last_generated_tokens[active_slot] = max_token_idx;
+                bs.generated_tokens[active_slot].push_back(max_token_idx);
+                bs.current_prompt_len[active_slot] = bs.current_prompt_len[active_slot] + 1;
             }
         }
     }
-    std::cout << "\nOk bye!\n";
-    cublasDestroy(cublas_handle);
+
     cudaDeviceSynchronize();
     return 0;
 }

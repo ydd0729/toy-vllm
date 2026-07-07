@@ -112,12 +112,13 @@ int main(int argc, char* argv[])
          });
 
     std::ostringstream buffer;
-    
+    const std::string sep(44, '=');
+
     for (const auto& o : output)
     {
-        buffer << "=== Request " << o.request_id << " ===\n"
-                  << "Q: " << o.input_message << "\n"
-                  << "A: " << o.output_message << "\n";
+        buffer << sep << " Request " << std::setw(2) << o.request_id << " " << sep << "\n\n"
+               << "Q: " << o.input_message << "\n"
+               << "A: " << o.output_message << "\n\n";
 
         // std::cout << "  Q Tokens: ";
         // for (const auto t : o.input_token)

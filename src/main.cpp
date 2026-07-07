@@ -20,6 +20,7 @@
 #include <CLI/CLI.hpp>
 #include <filesystem>
 #include <string_view>
+#include <chrono>
 
 int main(int argc, char* argv[])
 {
@@ -65,6 +66,8 @@ int main(int argc, char* argv[])
         input_queue.emplace(line);
     }
 
+    auto start = std::chrono::steady_clock::now();
+
     Weights w;
     BatchState bs;
     PagedKVCache pkv;
@@ -104,6 +107,10 @@ int main(int argc, char* argv[])
         output.insert(output.end(), std::make_move_iterator(out.begin()),
                       std::make_move_iterator(out.end()));
     }
+
+    auto end = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration<double>(end - start);
+    std::cout << "Elapsed: " << elapsed.count() << " s" << std::endl;
 
     sort(output.begin(), output.end(),
          [](const auto& a, const auto& b)

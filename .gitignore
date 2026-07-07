@@ -56,3 +56,5 @@ docs/
 cmake-build-*
 .idea/
 models/
+test/
+!test/input.txt

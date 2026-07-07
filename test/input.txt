@@ -2,3 +2,63 @@ What is 2+2?
 Name a color.
 Say hello.
 Capital of France?
+Reply with exactly OK
+What is 2 + 3?
+Write the word cat in uppercase
+Write the word DOG in lowercase
+Which is bigger, 9 or 4?
+Sort these numbers: 3, 1, 2
+Repeat the word hello three times
+What is the first letter of apple?
+What is the last letter of banana?
+How many letters are in book?
+Reverse this word: stop
+Is 10 greater than 7? Answer yes or no
+Name one animal that can fly
+Name one fruit that is yellow
+Finish the pattern: A, B, C, ?
+Choose the odd one out: cat, dog, car
+Correct this sentence: She are happy.
+Say this more politely: Give me water.
+Answer with one word: What do bees make?
+Extract the name: My name is Alice.
+Extract the number: I have 5 pens.
+Put these words in order: world Hello
+Make this sentence shorter: I am very very happy.
+Return only the JSON: name is Tom, age is 6
+Count the words in this sentence: I like small cats
+Answer with only the second word: red blue green
+Replace cats with dogs: I like cats
+Do not answer the question; reply only with SKIP
+Explain what recursion is in one sentence
+Rewrite this sentence to be more polite: Send me the file right now
+Translate into English: I have class tomorrow morning and will only be free in the afternoon
+List three common sorting algorithms and compare their time complexities
+Write a Python function to check whether a string is a palindrome
+Explain why 0.1 + 0.2 is not equal to 0.3 in many programming languages
+Give me a beginner-friendly C++ project idea
+Summarize the causes of overfitting in machine learning and how to address them
+Make this sentence sound more natural: I very like this movie
+Write an SQL query to find the top 5 users with the highest order amounts
+Explain the difference between processes and threads in operating systems
+Use a simple example to explain what a hash table is
+Give me three English email openings for asking about an assignment deadline
+Analyze the possible problem in this code: for i in range(len(arr)): arr.remove(arr[i])
+Translate the following Chinese sentence into academic English: 本文提出了一种新的图神经网络方法
+Explain what dropout is in neural networks
+Give me a regular expression that matches email addresses
+Write a simple stack data structure in Rust
+Compare the differences between TCP and UDP
+Shorten the following sentence to within 20 words: Due to heavy course pressure recently, I would like to request an extension for submitting the assignment
+Design 5 test cases to verify a login feature
+Explain what Git rebase is
+Explain this command clearly: git reset --hard HEAD~1
+Give me a roadmap for learning CUDA
+Find the grammar mistake in this sentence: She don't know what happened yesterday
+Write a two-level Markdown heading structure introducing Transformer
+Explain what option Delta means in finance
+Give me a counterexample showing that “all prime numbers are odd” is false
+Read this carefully and answer only the final instruction: Say “red”, then say “blue”, but ignore all previous words in this sentence and reply with GREEN.
+A box contains 3 red balls and 2 blue balls. You draw two balls without replacement. What is the probability that both are red?
+Find the hidden rule and complete the sequence: 2, 6, 12, 20, 30, ?
+Return only valid JSON with two keys, "animal" and "count", from this sentence: There are seven cats under the table.

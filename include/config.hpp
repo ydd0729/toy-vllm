@@ -64,7 +64,7 @@ constexpr int NUM_BLOCKS = KV_CACHE_SIZE_BYTES / BLOCK_BYTES; // 2*1024^3 / (16*
 constexpr int MAX_SEQUENCES = BATCH_SIZE;
 
 const std::filesystem::path model_path = std::filesystem::path("models");
-const std::filesystem::path llama3p2_1B_Instruct_path = model_path / "Llama-3.2-1B";
+const std::filesystem::path llama3p2_1B_Instruct_path = model_path / "Llama-3.2-1B-Instruct";
 const std::filesystem::path llama3p2_1B_Instruct_weights_path =
     llama3p2_1B_Instruct_path / "model.safetensors";
 const std::filesystem::path llama3p2_1B_Instruct_tokenizer_path =

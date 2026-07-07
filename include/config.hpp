@@ -36,8 +36,8 @@ constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>
 constexpr int MAX_SEQ_LEN = 2048;
 // Self-imposed max prompt length. Model allows up to 2048 for input + output.
 constexpr int MAX_PROMPT_LEN = 512;
-// Number of sequences processed together. TODO: only here to have batching at all
-constexpr int BATCH_SIZE = 2;
+// Number of sequences processed together. TODO: 改成运行时自适应
+constexpr int BATCH_SIZE = 4;
 // Tokens per PagedAttention page/block
 constexpr int BLOCK_SIZE = 16;
 // KV cache memory pool size. TODO: 改成可配置

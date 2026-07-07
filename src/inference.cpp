@@ -10,6 +10,8 @@
 #include "kernels.cuh"
 #include "utils.hpp"
 
+using tokenizers::Tokenizer;
+
 constexpr size_t BF16 = sizeof(nv_bfloat16);
 constexpr size_t INPUT_TOKENS_BYTES = MAX_PROMPT_LEN * sizeof(int);
 constexpr size_t INPUT_EMBEDDINGS_BYTES = MAX_PROMPT_LEN * EMBEDDING_LENGTH * BF16;
@@ -29,6 +31,25 @@ constexpr size_t K_PROJ_BATCHED_BYTES = BATCH_SIZE * KV_DIM * BF16;
 constexpr size_t V_PROJ_BATCHED_BYTES = BATCH_SIZE * KV_DIM * BF16;
 // Element count kept separately: embed_proj_cpu is sized in elements, not bytes.
 constexpr size_t EMBED_PROJ_LEN = MAX_BUFFER_SIZE * VOCAB_SIZE;
+
+std::unique_ptr<Tokenizer> load_tokenizer()
+{
+    std::ifstream tokenizer_file(llama3p2_1B_Instruct_tokenizer_path, std::ios_base::binary);
+
+    if (!tokenizer_file.is_open())
+    {
+        throw std::runtime_error(
+            std::format("Can't open {}", llama3p2_1B_Instruct_tokenizer_path.string()));
+    }
+
+    std::streamsize size = std::filesystem::file_size(llama3p2_1B_Instruct_tokenizer_path);
+
+    std::string blob;
+    blob.resize(size);
+    tokenizer_file.read(blob.data(), size);
+
+    return Tokenizer::FromBlobJSON(blob);
+}
 
 InferenceContext::InferenceContext()
 {
@@ -59,6 +80,8 @@ InferenceContext::InferenceContext()
     CUDA_CHECK(cudaMalloc(&last_tokens, LAST_TOKENS_BYTES));
     CUDA_CHECK(cudaMalloc(&active_slots, ACTIVE_SLOTS_BYTES));
     CUDA_CHECK(cudaMalloc(&seq_lens, SEQ_LENS_BYTES));
+
+    tok = load_tokenizer();
 }
 
 InferenceContext::~InferenceContext()
@@ -416,8 +439,14 @@ void PagedKVCache::cacheKV(int physical_block,
 BatchState::BatchState()
     : is_slot_free(BATCH_SIZE, true), generated_tokens(BATCH_SIZE),
       last_generated_tokens(BATCH_SIZE), current_prompt_len(BATCH_SIZE, 0),
-      request_id(BATCH_SIZE, -1), prompt(BATCH_SIZE, std::vector<int>())
+      request_id(BATCH_SIZE, -1), input_tokens(BATCH_SIZE), input_message(BATCH_SIZE)
 {
+}
+
+std::string apply_chat_template(const std::string& user_msg)
+{
+    return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" + user_msg +
+           "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
 }
 
 /**
@@ -439,24 +468,25 @@ BatchState::BatchState()
  * @param bs            batch 状态，跟踪各 slot 的占用情况与请求 id（is_slot_free / request_id）
  * @param w             模型权重，提供 embedding、各层投影/归一化及输出层的 GPU 指针
  */
-void prefill(std::queue<std::vector<int>>& prompt_queue,
+void prefill(std::queue<std::string>& input_queue,
              int slot,
              InferenceContext& ctx,
              PagedKVCache& pkv,
              BatchState& bs,
              Weights& w)
 {
-    // 获取当前 prompt
-    std::vector<int> prompt = std::move(prompt_queue.front());
-    prompt_queue.pop();
+    std::string msg = std::move(input_queue.front());
+    input_queue.pop();
+    std::vector<int> input_tokens = ctx.tok->Encode(apply_chat_template(msg));
 
-    bs.prompt[slot] = prompt;
+    bs.input_message[slot] = msg;
+    bs.input_tokens[slot] = input_tokens;
     // 标记当前 batch slot 为已占用，防止其他 prompt 被分配到同一 slot
     bs.is_slot_free[slot] = false;
     // 记录该 slot 装的是第几个请求（对应 PROMPT N），用于把输出对应回提问
     bs.request_id[slot] = bs.next_request_id++;
 
-    ctx.setInputTokens(prompt);
+    ctx.setInputTokens(input_tokens);
     ctx.copyInputTokensToGPU();
 
     // 对 prompt 中的每个 token 获取 embedding ，并保存到 input_embeddings 中
@@ -722,7 +752,9 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
         if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID ||
             bs.current_prompt_len[active_slot] == MAX_SEQ_LEN - 1)
         {
-            out.emplace_back(bs.request_id[active_slot], bs.prompt[active_slot], bs.generated_tokens[active_slot]);
+            out.emplace_back(bs.request_id[active_slot], bs.input_message[active_slot],
+                             ctx.tok->Decode(bs.generated_tokens[active_slot]),
+                             bs.input_tokens[active_slot], bs.generated_tokens[active_slot]);
 
             bs.is_slot_free[active_slot] = true;
             for (int layer = 0; layer < N_LAYERS; ++layer)

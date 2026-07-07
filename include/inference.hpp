@@ -2,11 +2,13 @@
 
 #include "config.hpp"
 
+#include <memory>
 #include <vector>
 #include <cuda_bf16.h>
 #include <cublas_v2.h>
 #include <queue>
 #include <weights.hpp>
+#include <tokenizers_cpp.h>
 
 struct InferenceContext
 {
@@ -114,6 +116,8 @@ public:
     int* last_tokens;  // last generated token id per active slot (fed to embeddingGatherDecode)
     int* active_slots; // active slot indices
     int* seq_lens;     // current sequence length per active slot
+
+    std::unique_ptr<tokenizers::Tokenizer> tok;
 };
 
 struct PagedKVCache
@@ -166,7 +170,9 @@ struct BatchState
     std::vector<int> request_id;
 
     // 每个 slot 对应的 prompt
-    std::vector<std::vector<int>> prompt;
+    std::vector<std::vector<int>> input_tokens;
+
+    std::vector<std::string> input_message;
 
     // 下一个请求编号，每次 prefill 取走一个 prompt 时分配并自增
     int next_request_id = 0;
@@ -178,17 +184,21 @@ struct BatchState
     BatchState();
 };
 
-struct RequestOutput {
+struct RequestOutput
+{
     int request_id;
+    std::string input_message;
+    std::string output_message;
     std::vector<int> input_token;
     std::vector<int> output_token;
 };
 
-void prefill(std::queue<std::vector<int>>& prompt_queue,
+void prefill(std::queue<std::string>& prompt_queue,
              int slot,
              InferenceContext& ctx,
              PagedKVCache& pkv,
              BatchState& bs,
              Weights& w);
 
-std::vector<RequestOutput> decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w);
+std::vector<RequestOutput>
+decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w);

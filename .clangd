@@ -6,6 +6,7 @@ CompileFlags:
     # 让 clangd 正确解析 .cu 文件
     - "--cuda-path=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2"
     - "--cuda-gpu-arch=sm_120"
+    - "-ID:/Projects/toy-vllm/third_party/CLI11/include"
   Remove:
     # nvcc / MSVC 专有、clangd 不认或会报错的开关
     - "-G"                      # nvcc 设备端调试信息(debug 构建)，clang 不认

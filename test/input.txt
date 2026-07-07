@@ -1,0 +1,4 @@
+What is 2+2?
+Name a color.
+Say hello.
+Capital of France?

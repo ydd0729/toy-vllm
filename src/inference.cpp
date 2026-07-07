@@ -1,6 +1,7 @@
 #include "inference.hpp"
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include "config.hpp"
@@ -9,6 +10,7 @@
 #include <numeric>
 #include "kernels.cuh"
 #include "utils.hpp"
+
 
 using tokenizers::Tokenizer;
 

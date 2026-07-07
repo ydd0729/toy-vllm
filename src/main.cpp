@@ -31,7 +31,10 @@ int main(int argc, char* argv[])
     CLI::App app;
     argv = app.ensure_utf8(argv);
     std::filesystem::path user_message_path;
+    std::filesystem::path output_path;
+
     app.add_option("-f,--file", user_message_path)->required();
+    app.add_option("-o,--output", output_path)->required();
 
     CLI11_PARSE(app, argc, argv);
 
@@ -108,12 +111,31 @@ int main(int argc, char* argv[])
              return a.request_id < b.request_id;
          });
 
+    std::ostringstream buffer;
+    
     for (const auto& o : output)
     {
-        std::cout << "Request " << o.request_id << ": \n"
-                  << "  Q: " << o.input_message << "\n"
-                  << "  A: " << o.output_message << std::endl;
+        buffer << "=== Request " << o.request_id << " ===\n"
+                  << "Q: " << o.input_message << "\n"
+                  << "A: " << o.output_message << "\n";
+
+        // std::cout << "  Q Tokens: ";
+        // for (const auto t : o.input_token)
+        // {
+        //     std::cout << t << " ";
+        // }
+
+        // std::cout << "\n  A Tokens: ";
+        // for (const auto t : o.output_token)
+        // {
+        //     std::cout << t << " ";
+        // }
     }
+
+    std::ofstream out(output_path, std::ios::binary);
+    out.exceptions(std::ios::failbit | std::ios::badbit);
+    std::string_view content = buffer.view();
+    out.write(content.data(), static_cast<std::streamsize>(content.size()));
 
     cudaDeviceSynchronize();
     return 0;

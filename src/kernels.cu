@@ -226,6 +226,86 @@ void rope(nv_bfloat16* input, int num_tokens, int proj_dim)
 }
 
 /**
+ * @brief RoPE（rotate_half / HF 约定版）
+ *
+ * 与 ropeKernel（相邻交错配对）并列的另一种实现。HF 的 safetensors 权重按 rotate_half 布局排列：
+ * 每个 HEAD_DIM=64 维 head 内，通道 j 与通道 j+32 组成一对（前半 32 维与后半 32 维配对），
+ * 而非相邻的 (2i, 2i+1)。基础频率 theta_j = 500000^(-2j/HEAD_DIM)，再经 llama3 rope_scaling 缩放。
+ *
+ *   x'_j      = x_j      * cos(angle) - x_{j+32} * sin(angle)
+ *   x'_{j+32} = x_{j+32} * cos(angle) + x_j      * sin(angle)
+ *
+ * 线程映射：threadIdx.x = t → head h = t/32，对内索引 j = t%32
+ */
+
+// Llama 3.2 的 rope_scaling（config.json 里 rope_type="llama3"）：按波长分三段缩放频率。
+//   波长 > 8192（低频）：频率 ÷ factor(32)；波长 < 2048（高频）：不变；中间：线性平滑过渡。
+// 不实现它会导致每个 head 约一半维度的频率差 32 倍，位置越靠后位置编码偏得越远（长生成退化）。
+__device__ inline float llama3ScaledTheta(int j)
+{
+    constexpr float FACTOR = 32.0f;            // rope_scaling.factor
+    constexpr float LOW_FREQ_FACTOR = 1.0f;    // rope_scaling.low_freq_factor
+    constexpr float HIGH_FREQ_FACTOR = 4.0f;   // rope_scaling.high_freq_factor
+    constexpr float OLD_CONTEXT_LEN = 8192.0f; // rope_scaling.original_max_position_embeddings
+
+    float theta = 1.0f / powf(500000.0f, ((float) (2 * j) / HEAD_DIM));
+    float wavelen = 2.0f * CUDART_PI_F / theta;
+
+    if (wavelen > OLD_CONTEXT_LEN / LOW_FREQ_FACTOR) // 低频段：频率整体除以 factor
+    {
+        return theta / FACTOR;
+    }
+    if (wavelen < OLD_CONTEXT_LEN / HIGH_FREQ_FACTOR) // 高频段：保持原频率
+    {
+        return theta;
+    }
+    // 过渡段：在 缩放/不缩放 之间线性插值
+    float smooth =
+        (OLD_CONTEXT_LEN / wavelen - LOW_FREQ_FACTOR) / (HIGH_FREQ_FACTOR - LOW_FREQ_FACTOR);
+    return (1.0f - smooth) * theta / FACTOR + smooth * theta;
+}
+
+__global__ void ropeRotateHalfKernel(nv_bfloat16* input, int num_tokens, int proj_dim)
+{
+    int h = threadIdx.x / 32;
+    int j = threadIdx.x % 32;
+    int row = blockIdx.x * proj_dim;
+    int i0 = row + h * HEAD_DIM + j; // 通道 j
+    int i1 = i0 + HEAD_DIM / 2;      // 通道 j + 32
+
+    if (i1 < num_tokens * proj_dim)
+    {
+        float theta = llama3ScaledTheta(j);
+        float angle = blockIdx.x * theta;
+
+        float x0 = input[i0];
+        float x1 = input[i1];
+
+        input[i0] = x0 * cos(angle) - x1 * sin(angle);
+        input[i1] = x1 * cos(angle) + x0 * sin(angle);
+    }
+}
+
+void ropeRotateHalf(nv_bfloat16* input, int num_tokens, int proj_dim)
+{
+    int num_threads = proj_dim / 2;
+    if (num_threads > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, RoPE kernel not launched";
+        return;
+    }
+
+    ropeRotateHalfKernel<<<num_tokens, num_threads>>>(input, num_tokens, proj_dim);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+
+/**
  * @brief 因果掩码（Causal Mask）：阻止 token 关注未来的 token
  *
  * 自回归语言模型中，每个 token 只能看到它自己和之前的 token，不能看到未来的 token。
@@ -553,6 +633,45 @@ void ropeDecode(nv_bfloat16* input, int position_in_sequence, int proj_dim)
 #endif
 }
 
+// Decode 版 rotate_half：单 token（无行偏移），配对通道 j 与 j+32
+__global__ void
+ropeKernelDecodeRotateHalf(nv_bfloat16* input, int position_in_sequence, int proj_dim)
+{
+    int h = threadIdx.x / 32;
+    int j = threadIdx.x % 32;
+    int i0 = h * HEAD_DIM + j;  // 通道 j
+    int i1 = i0 + HEAD_DIM / 2; // 通道 j + 32
+
+    if (i1 < proj_dim)
+    {
+        float theta = llama3ScaledTheta(j);
+        float angle = position_in_sequence * theta;
+        float x0 = input[i0];
+        float x1 = input[i1];
+        input[i0] = (nv_bfloat16) (x0 * cos(angle) - x1 * sin(angle));
+        input[i1] = (nv_bfloat16) (x1 * cos(angle) + x0 * sin(angle));
+    }
+}
+
+void ropeDecodeRotateHalf(nv_bfloat16* input, int position_in_sequence, int proj_dim)
+{
+    int num_threads = proj_dim / 2;
+    if (num_threads > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, RoPE kernel not launched";
+        return;
+    }
+
+    ropeKernelDecodeRotateHalf<<<1, num_threads>>>(input, position_in_sequence, proj_dim);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+
 // seq_len increases by 1 with every new token
 __global__ void softmaxKernelDecode(nv_bfloat16* input, int seq_len)
 {
@@ -737,6 +856,7 @@ __global__ void pagedAttentionKernel(int layer,
             float exp_score = expf(dot_product - current_max);
             d = d * correction_factor + exp_score;
             acc = acc * correction_factor + exp_score * (float) *v;
+            __syncthreads();
         }
     }
     output[active_slot * EMBEDDING_LENGTH + q_head_id * HEAD_DIM + thread_id] = acc / d;

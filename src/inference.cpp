@@ -518,8 +518,8 @@ void prefill(std::queue<std::string>& input_queue,
 
         // RoPE
 
-        rope(ctx.query_states, ctx.input_token_len, EMBEDDING_LENGTH);
-        rope(ctx.key_states, ctx.input_token_len, KV_DIM);
+        ropeRotateHalf(ctx.query_states, ctx.input_token_len, EMBEDDING_LENGTH);
+        ropeRotateHalf(ctx.key_states, ctx.input_token_len, KV_DIM);
 
         // PagedAttention：将本序列 prefill 得到的 K/V 按块散射进 kv_cache。
         // 每 BLOCK_SIZE 个 token 占一个逻辑块，共需 ceil(input_token_len / BLOCK_SIZE) 个块。
@@ -675,9 +675,10 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
         for (int slot = 0; slot < num_active_slots; ++slot)
         {
             int active_slot = bs.active_slots[slot];
-            ropeDecode(&ctx.query_states[slot * EMBEDDING_LENGTH],
-                       bs.current_prompt_len[active_slot], EMBEDDING_LENGTH);
-            ropeDecode(ctx.key_states + slot * KV_DIM, bs.current_prompt_len[active_slot], KV_DIM);
+            ropeDecodeRotateHalf(&ctx.query_states[slot * EMBEDDING_LENGTH],
+                                 bs.current_prompt_len[active_slot], EMBEDDING_LENGTH);
+            ropeDecodeRotateHalf(ctx.key_states + slot * KV_DIM,
+                                 bs.current_prompt_len[active_slot], KV_DIM);
         }
 
         // PagedAttention：把每个活跃序列这一步的新 K/V 散射进各自 KV cache 的下一个位置

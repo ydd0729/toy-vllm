@@ -115,7 +115,7 @@ def main():
         logits = output.logits[0, -1, :]  # last token's logits
         predicted = torch.argmax(logits).item()
         print(f"Predicted token ID: {predicted}")
-        print(f"Decoded: {tokenizer.decode([predicted])}")
+        print(f"Decoded: {tokenizer.decode([predicted], clean_up_tokenization_spaces=False)}")
 
 
 if __name__ == "__main__":

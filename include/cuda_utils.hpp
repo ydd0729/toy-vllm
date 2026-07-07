@@ -1,6 +1,5 @@
 #pragma once
 #include <iostream>
-#include <stdexcept>
 #include "config.hpp"
 
 // do { ... } while (0) 是多语句宏的标准惯用法，让宏在任何语法位置都表现得像“一条语句”：

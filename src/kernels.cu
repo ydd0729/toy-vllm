@@ -13,8 +13,8 @@
  * __global__ 是 CUDA C++ 中的函数修饰符，表示这是一个 kernel 函数。
  *
  * - 调用与执行：它在 CPU（Host）端调用，但在 GPU（Device）端执行。
- * - 并行特性：调用时必须使用 <<<网格大小, 线程块大小>>> 语法（如代码中的 <<<num_input_tokens, 1024>>>），
- *   这会启动大量线程在 GPU 上并行执行该函数的代码。
+ * - 并行特性：调用时必须使用 <<<网格大小, 线程块大小>>> 语法（如代码中的 <<<num_input_tokens,
+ * 1024>>>）， 这会启动大量线程在 GPU 上并行执行该函数的代码。
  * - 限制：返回值必须是 void。
  *
  * @param gpu_input_tokens N 个 token
@@ -23,8 +23,8 @@
  * @param num_input_tokens N
  */
 __global__ void embeddingGatherKernel(int* gpu_input_tokens,
-                                      __nv_bfloat16* gpu_input_embeds,
-                                      __nv_bfloat16* embed_tokens,
+                                      nv_bfloat16* gpu_input_embeds,
+                                      nv_bfloat16* embed_tokens,
                                       int num_input_tokens)
 {
     // blockIdx 表示第几个 Token
@@ -35,12 +35,15 @@ __global__ void embeddingGatherKernel(int* gpu_input_tokens,
     {
         // gpu_input_tokens[blockIdx.x]：获取当前正在处理的实际 token id
         // gpu_input_tokens[blockIdx.x] * 2048：每个 embedding 的长度是 2048
-        // gpu_input_tokens[blockIdx.x] * 2048 + threadIdx.x：加上当前线程负责的列索引，定位到具体的维度
+        // gpu_input_tokens[blockIdx.x] * 2048 +
+        // threadIdx.x：加上当前线程负责的列索引，定位到具体的维度
         gpu_input_embeds[workIdx] = embed_tokens[gpu_input_tokens[blockIdx.x] * 2048 + threadIdx.x];
-        // 这里访问 threadIdx.x 和 threadIdx.x + 1024（而非相邻的 2*threadIdx.x 和 2*threadIdx.x+1），
-        // 是为了保证同一个 Warp（32 个线程）在同一时刻访问连续的内存地址，实现合并访存（Coalesced Access）。
+        // 这里访问 threadIdx.x 和 threadIdx.x + 1024（而非相邻的 2*threadIdx.x 和
+        // 2*threadIdx.x+1）， 是为了保证同一个 Warp（32
+        // 个线程）在同一时刻访问连续的内存地址，实现合并访存（Coalesced Access）。
         // 若改为相邻位置，Warp 内线程会读取 0,2,4,6... 这样的跨步地址，导致内存带宽浪费。
-        gpu_input_embeds[workIdx + 1024] = embed_tokens[gpu_input_tokens[blockIdx.x] * 2048 + threadIdx.x + 1024];
+        gpu_input_embeds[workIdx + 1024] =
+            embed_tokens[gpu_input_tokens[blockIdx.x] * 2048 + threadIdx.x + 1024];
     }
 }
 
@@ -53,12 +56,12 @@ __global__ void embeddingGatherKernel(int* gpu_input_tokens,
  * @param num_input_tokens N
  */
 void embeddingGather(int* gpu_input_tokens,
-                     __nv_bfloat16* gpu_input_embeds,
-                     __nv_bfloat16* embed_tokens,
+                     nv_bfloat16* gpu_input_embeds,
+                     nv_bfloat16* embed_tokens,
                      int num_input_tokens)
 {
-    embeddingGatherKernel<<<num_input_tokens, 1024>>>(gpu_input_tokens, gpu_input_embeds, embed_tokens,
-                                                      num_input_tokens);
+    embeddingGatherKernel<<<num_input_tokens, 1024>>>(gpu_input_tokens, gpu_input_embeds,
+                                                      embed_tokens, num_input_tokens);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
@@ -83,7 +86,8 @@ void embeddingGather(int* gpu_input_tokens,
  * @param norm_weights 可学习的缩放权重 gamma [2048]，bfloat16
  * @param num_tokens   token 数量 N（即 grid 中的 block 数量）
  */
-__global__ void rmsNormKernel(__nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16* norm_weights, int num_tokens)
+__global__ void
+rmsNormKernel(nv_bfloat16* input, nv_bfloat16* output, nv_bfloat16* norm_weights, int num_tokens)
 {
     // __shared__ 是 CUDA 的内存修饰符，声明变量位于共享内存（Shared Memory）中。
     //
@@ -97,7 +101,8 @@ __global__ void rmsNormKernel(__nv_bfloat16* input, __nv_bfloat16* output, __nv_
     // 在这里，__shared__ float rms_vector[1024] 用于让 1024 个线程协作完成树形归约求和：
     // 每个线程写入自己的平方和，然后互相读取、累加，最终得到整个 token 的平方和。
     //
-    // 这里使用 float 是为了在计算过程中保留更多精度（bfloat16 的指数位和 float 一样多，但尾数为只有 7 位）
+    // 这里使用 float 是为了在计算过程中保留更多精度（bfloat16 的指数位和 float 一样多，但尾数为只有
+    // 7 位）
     __shared__ float rms_vector[1024];
     int workIdx = threadIdx.x + blockIdx.x * 2048;
     if (workIdx < num_tokens * 2048)
@@ -135,17 +140,17 @@ __global__ void rmsNormKernel(__nv_bfloat16* input, __nv_bfloat16* output, __nv_
         __syncthreads();
 
         // 计算 RMS Norm
-        output[workIdx] =
-            (__nv_bfloat16) (((float) input[workIdx] / rms_vector[0]) * (float) norm_weights[threadIdx.x]);
-        output[workIdx + 1024] = (__nv_bfloat16) (((float) input[workIdx + 1024] / rms_vector[0]) *
-                                                  (float) norm_weights[threadIdx.x + 1024]);
+        output[workIdx] = (nv_bfloat16) (((float) input[workIdx] / rms_vector[0]) *
+                                         (float) norm_weights[threadIdx.x]);
+        output[workIdx + 1024] = (nv_bfloat16) (((float) input[workIdx + 1024] / rms_vector[0]) *
+                                                (float) norm_weights[threadIdx.x + 1024]);
     }
 }
 
 /**
  * @brief rmsNormKernel 的包装函数
  */
-void rmsNorm(__nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16* norm_weights, int num_tokens)
+void rmsNorm(nv_bfloat16* input, nv_bfloat16* output, nv_bfloat16* norm_weights, int num_tokens)
 {
     rmsNormKernel<<<num_tokens, 1024>>>(input, output, norm_weights, num_tokens);
 #ifdef DEBUG
@@ -176,14 +181,15 @@ void rmsNorm(__nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16* norm_we
  * @param num_tokens token 数量 N
  * @param proj_dim   投影维度（Q=2048, K=512）
  */
-__global__ void ropeKernel(__nv_bfloat16* input, int num_tokens, int proj_dim)
+__global__ void ropeKernel(nv_bfloat16* input, int num_tokens, int proj_dim)
 {
     if (2 * threadIdx.x + 1 + blockIdx.x * proj_dim < num_tokens * proj_dim)
     {
         // head_idx: 当前对在 head 内的维度索引（0, 2, 4, ..., 62），% 32 因为 HEAD_DIM=64 有 32 对
         // theta: 该维度对的旋转频率，维度越高频率越低（LLaMA 3 基频 500000）
         // angle: 旋转角度 = 位置 m * 频率 theta
-        // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel invocations
+        // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel
+        // invocations
         int head_idx = 2 * (threadIdx.x % 32);
         float theta = 1.0 / (pow(500000.0, ((float) head_idx / HEAD_DIM)));
         float angle = blockIdx.x * theta;
@@ -193,12 +199,14 @@ __global__ void ropeKernel(__nv_bfloat16* input, int num_tokens, int proj_dim)
         float prev_2j = input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim];
 
         // 应用 2D 旋转并写回
-        input[2 * threadIdx.x + blockIdx.x * proj_dim] = prev_2i * cos(angle) - prev_2j * sin(angle);
-        input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim] = prev_2i * sin(angle) + prev_2j * cos(angle);
+        input[2 * threadIdx.x + blockIdx.x * proj_dim] =
+            prev_2i * cos(angle) - prev_2j * sin(angle);
+        input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim] =
+            prev_2i * sin(angle) + prev_2j * cos(angle);
     }
 }
 
-void rope(__nv_bfloat16* input, int num_tokens, int proj_dim)
+void rope(nv_bfloat16* input, int num_tokens, int proj_dim)
 {
     int num_threads = proj_dim / 2;
     if (num_threads > 1024)
@@ -239,7 +247,7 @@ void rope(__nv_bfloat16* input, int num_tokens, int proj_dim)
  * @param input      注意力分数矩阵，原地修改，bfloat16
  * @param num_tokens token 数量
  */
-__global__ void causalMaskKernel(__nv_bfloat16* input, int num_tokens)
+__global__ void causalMaskKernel(nv_bfloat16* input, int num_tokens)
 {
     // 边界检查：确保不超出总元素数
     if (threadIdx.x + blockIdx.x * blockDim.x >= num_tokens * num_tokens * NUM_Q_HEADS)
@@ -257,11 +265,12 @@ __global__ void causalMaskKernel(__nv_bfloat16* input, int num_tokens)
     }
 }
 
-void causalMask(__nv_bfloat16* input, int num_tokens)
+void causalMask(nv_bfloat16* input, int num_tokens)
 {
     if (num_tokens > 1024)
     {
-        std::cout << "Can't launch more than 1024 threads on RTX 5090, Causal mask kernel not launched";
+        std::cout
+            << "Can't launch more than 1024 threads on RTX 5090, Causal mask kernel not launched";
         return;
     }
 
@@ -302,10 +311,11 @@ void causalMask(__nv_bfloat16* input, int num_tokens)
  *   threadIdx.x = column（每个线程处理一列）
  *   共 num_tokens * NUM_Q_HEADS 个 block，每个 block num_tokens 个线程
  *
- * @param input      经过因果掩码后的注意力分数矩阵 [NUM_Q_HEADS, num_tokens, num_tokens]，原地修改，bfloat16
+ * @param input      经过因果掩码后的注意力分数矩阵 [NUM_Q_HEADS, num_tokens,
+ * num_tokens]，原地修改，bfloat16
  * @param num_tokens token 数量
  */
-__global__ void softmaxKernel(__nv_bfloat16* input, int num_tokens)
+__global__ void softmaxKernel(nv_bfloat16* input, int num_tokens)
 {
     // 使用固定大小的共享内存存储一行数据，用于树形归约求最大值和总和
     __shared__ float row[1024]; // row[0] 最终存储最大值，之后复用为求和结果
@@ -313,7 +323,7 @@ __global__ void softmaxKernel(__nv_bfloat16* input, int num_tokens)
 
     // 第一步：找出每行的最大值 max_val，用于数值稳定的 softmax（防止 exp 溢出）
     int workIdx = blockIdx.x * num_tokens + threadIdx.x;
-    __nv_bfloat16 attn_score = input[workIdx]; // 当前线程负责的注意力分数
+    nv_bfloat16 attn_score = input[workIdx]; // 当前线程负责的注意力分数
     row[threadIdx.x] = attn_score;
     __syncthreads();
 
@@ -348,16 +358,17 @@ __global__ void softmaxKernel(__nv_bfloat16* input, int num_tokens)
     }
 
     // 第四步：softmax = exp(attn_score - max_val) / sum(exp)
-    input[workIdx] = (__nv_bfloat16) (expf((float) attn_score - max_val) / row[0]);
+    input[workIdx] = (nv_bfloat16) (expf((float) attn_score - max_val) / row[0]);
 }
 
 /**
  * @brief softmaxKernel 的包装函数
  *
- * @param input      经过因果掩码后的注意力分数矩阵 [NUM_Q_HEADS, num_tokens, num_tokens]，原地修改，bfloat16
+ * @param input      经过因果掩码后的注意力分数矩阵 [NUM_Q_HEADS, num_tokens,
+ * num_tokens]，原地修改，bfloat16
  * @param num_tokens token 数量
  */
-void softmax(__nv_bfloat16* input, int num_tokens)
+void softmax(nv_bfloat16* input, int num_tokens)
 {
     if (num_tokens > 1024)
     {
@@ -389,14 +400,14 @@ void softmax(__nv_bfloat16* input, int num_tokens)
  * @param input        子层输出 [N, 2048]，原地修改为相加后的结果
  * @param input_embeds 原始输入（子层前的 embedding）[N, 2048]
  */
-__global__ void residualKernel(__nv_bfloat16* input, __nv_bfloat16* input_embeds)
+__global__ void residualKernel(nv_bfloat16* input, nv_bfloat16* input_embeds)
 {
     int workIdx = threadIdx.x + blockIdx.x * 2048;
     input[workIdx] = input[workIdx] + input_embeds[workIdx];
     input[workIdx + 1024] = input[workIdx + 1024] + input_embeds[workIdx + 1024];
 }
 
-void residualAdd(__nv_bfloat16* input, __nv_bfloat16* input_embeds, int num_tokens)
+void residualAdd(nv_bfloat16* input, nv_bfloat16* input_embeds, int num_tokens)
 {
     residualKernel<<<num_tokens, 1024>>>(input, input_embeds);
 #ifdef DEBUG
@@ -437,7 +448,7 @@ void residualAdd(__nv_bfloat16* input, __nv_bfloat16* input_embeds, int num_toke
  * @param a gate 投影输出 [N, 8192]，bfloat16，原地修改为 SiLU(a) ⊙ b
  * @param b up 投影输出 [N, 8192]，bfloat16，只读
  */
-__global__ void siluKernel(__nv_bfloat16* a, __nv_bfloat16* b)
+__global__ void siluKernel(nv_bfloat16* a, nv_bfloat16* b)
 {
     // workIdx: 当前线程处理的第一个元素的线性索引
     // blockIdx.x * 8192: 跳过前面 token 的所有元素（每个 token 8192 维）
@@ -450,8 +461,9 @@ __global__ void siluKernel(__nv_bfloat16* a, __nv_bfloat16* b)
     {
         // SiLU(a[i]) = a[i] * sigmoid(a[i]) = a[i] * (1 / (1 + exp(-a[i])))
         // 再乘以 b[i] 得到门控激活结果
-        a[workIdx + i] = (__nv_bfloat16) ((float) a[workIdx + i] * (1 / (1 + expf(-(float) a[workIdx + i]))) *
-                                          (float) b[workIdx + i]);
+        a[workIdx + i] =
+            (nv_bfloat16) ((float) a[workIdx + i] * (1 / (1 + expf(-(float) a[workIdx + i]))) *
+                           (float) b[workIdx + i]);
     }
 }
 
@@ -462,7 +474,7 @@ __global__ void siluKernel(__nv_bfloat16* a, __nv_bfloat16* b)
  * @param b          up 投影输出 [N, 8192]，bfloat16，只读
  * @param num_tokens token 数量 N（即 grid 中的 block 数量）
  */
-void silu(__nv_bfloat16* a, __nv_bfloat16* b, int num_tokens)
+void silu(nv_bfloat16* a, nv_bfloat16* b, int num_tokens)
 {
     siluKernel<<<num_tokens, 1024>>>(a, b);
 }
@@ -471,8 +483,10 @@ void silu(__nv_bfloat16* a, __nv_bfloat16* b, int num_tokens)
 //                                  Decode
 // =============================================================================
 
-__global__ void
-embeddingGatherKernelDecode(int* gpu_last_tokens, int num_tokens, __nv_bfloat16* output, __nv_bfloat16* embed_tokens)
+__global__ void embeddingGatherKernelDecode(int* gpu_last_tokens,
+                                            int num_tokens,
+                                            nv_bfloat16* output,
+                                            nv_bfloat16* embed_tokens)
 {
     int input_token = gpu_last_tokens[blockIdx.x];
     int workIdx = blockIdx.x * 2048 + threadIdx.x;
@@ -483,9 +497,13 @@ embeddingGatherKernelDecode(int* gpu_last_tokens, int num_tokens, __nv_bfloat16*
     }
 }
 
-void embeddingGatherDecode(int* gpu_last_tokens, int num_tokens, __nv_bfloat16* output, __nv_bfloat16* embed_tokens)
+void embeddingGatherDecode(int* gpu_last_tokens,
+                           int num_tokens,
+                           nv_bfloat16* output,
+                           nv_bfloat16* embed_tokens)
 {
-    embeddingGatherKernelDecode<<<num_tokens, 1024>>>(gpu_last_tokens, num_tokens, output, embed_tokens);
+    embeddingGatherKernelDecode<<<num_tokens, 1024>>>(gpu_last_tokens, num_tokens, output,
+                                                      embed_tokens);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
@@ -495,25 +513,28 @@ void embeddingGatherDecode(int* gpu_last_tokens, int num_tokens, __nv_bfloat16* 
 #endif
 }
 
-__global__ void ropeKernelDecode(__nv_bfloat16* input, int position_in_sequence, int proj_dim)
+__global__ void ropeKernelDecode(nv_bfloat16* input, int position_in_sequence, int proj_dim)
 {
     if (2 * threadIdx.x + 1 < proj_dim) // TODO: check correctness
     {
-        // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel invocations
+        // TODO: precompute thetas, angles and perhaps sin/cos vals and reuse it across all kernel
+        // invocations
         int head_idx = 2 * (threadIdx.x % 32);
         float theta = 1.0 / (pow(500000.0, ((float) head_idx / HEAD_DIM)));
         float angle = position_in_sequence * theta;
-        __nv_bfloat16 prev_2i = input[2 * threadIdx.x];
-        __nv_bfloat16 prev_2j = input[2 * threadIdx.x + 1];
-        input[2 * threadIdx.x] = (__nv_bfloat16) ((float) prev_2i * cos(angle) - (float) prev_2j * sin(angle));
-        input[2 * threadIdx.x + 1] = (__nv_bfloat16) ((float) prev_2i * sin(angle) + (float) prev_2j * cos(angle));
+        nv_bfloat16 prev_2i = input[2 * threadIdx.x];
+        nv_bfloat16 prev_2j = input[2 * threadIdx.x + 1];
+        input[2 * threadIdx.x] =
+            (nv_bfloat16) ((float) prev_2i * cos(angle) - (float) prev_2j * sin(angle));
+        input[2 * threadIdx.x + 1] =
+            (nv_bfloat16) ((float) prev_2i * sin(angle) + (float) prev_2j * cos(angle));
     }
 }
 
 // proj_dim: q_proj 2048, k_proj 512
-// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512
-// for k_proj)
-void ropeDecode(__nv_bfloat16* input, int position_in_sequence, int proj_dim)
+// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads
+// (1024 for q_proj and 512 for k_proj)
+void ropeDecode(nv_bfloat16* input, int position_in_sequence, int proj_dim)
 {
     int num_threads = proj_dim / 2;
     if (num_threads > 1024)
@@ -533,7 +554,7 @@ void ropeDecode(__nv_bfloat16* input, int position_in_sequence, int proj_dim)
 }
 
 // seq_len increases by 1 with every new token
-__global__ void softmaxKernelDecode(__nv_bfloat16* input, int seq_len)
+__global__ void softmaxKernelDecode(nv_bfloat16* input, int seq_len)
 {
     // 使用固定大小的共享内存存储一行数据，用于树形归约求最大值和总和
     __shared__ float row[1024]; // row[0] 最终存储最大值，之后复用为求和结果
@@ -541,7 +562,7 @@ __global__ void softmaxKernelDecode(__nv_bfloat16* input, int seq_len)
 
     // 第一步：找出每行的最大值 max_val，用于数值稳定的 softmax（防止 exp 溢出）
     int workIdx = blockIdx.x * MAX_SEQ_LEN + threadIdx.x;
-    __nv_bfloat16 attn_score = input[workIdx]; // 当前线程负责的注意力分数
+    nv_bfloat16 attn_score = input[workIdx]; // 当前线程负责的注意力分数
     row[threadIdx.x] = (float) attn_score;
     __syncthreads();
 
@@ -575,7 +596,7 @@ __global__ void softmaxKernelDecode(__nv_bfloat16* input, int seq_len)
     }
 
     // 第四步：softmax = exp(attn_score - max_val) / sum(exp)
-    input[workIdx] = (__nv_bfloat16) (expf((float) attn_score - max_val) / row[0]);
+    input[workIdx] = (nv_bfloat16) (expf((float) attn_score - max_val) / row[0]);
 }
 
 /**
@@ -584,7 +605,7 @@ __global__ void softmaxKernelDecode(__nv_bfloat16* input, int seq_len)
  * @param input   经过因果掩码后的注意力分数矩阵 [NUM_Q_HEADS, MAX_SEQ_LEN]，原地修改，bfloat16
  * @param seq_len 当前序列长度（随每个新 token 递增）
  */
-void softmaxDecode(__nv_bfloat16* input, int seq_len)
+void softmaxDecode(nv_bfloat16* input, int seq_len)
 {
     if (seq_len > 1024)
     {
@@ -645,12 +666,12 @@ void softmaxDecode(__nv_bfloat16* input, int seq_len)
  */
 __global__ void pagedAttentionKernel(int layer,
                                      int num_active_slots,
-                                     __nv_bfloat16* q_proj,
-                                     __nv_bfloat16* kv_cache,
+                                     nv_bfloat16* q_proj,
+                                     nv_bfloat16* kv_cache,
                                      int* block_table_gpu,
                                      int* gpu_seq_lens,
                                      int* gpu_active_slots,
-                                     __nv_bfloat16* output)
+                                     nv_bfloat16* output)
 {
     __shared__ float dot_products[2];
     int active_slot = blockIdx.x; // active_slot == seq_id
@@ -658,7 +679,7 @@ __global__ void pagedAttentionKernel(int layer,
     int q_head_id = blockIdx.y;
     int thread_id = threadIdx.x;
     int kv_head_idx = q_head_id / GQA_Q_TO_K_RATIO;
-    __nv_bfloat16 q = q_proj[active_slot * EMBEDDING_LENGTH + q_head_id * HEAD_DIM + thread_id];
+    nv_bfloat16 q = q_proj[active_slot * EMBEDDING_LENGTH + q_head_id * HEAD_DIM + thread_id];
     int seq_len = gpu_seq_lens[active_slot];
     int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
@@ -669,19 +690,19 @@ __global__ void pagedAttentionKernel(int layer,
 
     for (int logical_block_idx = 0; logical_block_idx < num_blocks; ++logical_block_idx)
     {
-        int physical_block =
-            block_table_gpu[slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
+        int physical_block = block_table_gpu[slot * N_LAYERS * MAX_BLOCKS_PER_SEQ +
+                                             layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
         int tokens_in_block = min(seq_len - logical_block_idx * BLOCK_SIZE, BLOCK_SIZE);
         for (int token = 0; token < tokens_in_block; ++token)
         {
-            __nv_bfloat16* k =
-                (__nv_bfloat16*) ((char*) kv_cache + physical_block * BLOCK_BYTES +
-                                  token * KV_DIM * sizeof(__nv_bfloat16) +
-                                  kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
-            __nv_bfloat16* v =
-                (__nv_bfloat16*) ((char*) kv_cache + physical_block * BLOCK_BYTES + V_OFFSET +
-                                  token * KV_DIM * sizeof(__nv_bfloat16) +
-                                  kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
+            nv_bfloat16* k = (nv_bfloat16*) ((char*) kv_cache + physical_block * BLOCK_BYTES +
+                                             token * KV_DIM * sizeof(nv_bfloat16) +
+                                             kv_head_idx * HEAD_DIM * sizeof(nv_bfloat16) +
+                                             thread_id * sizeof(nv_bfloat16));
+            nv_bfloat16* v = (nv_bfloat16*) ((char*) kv_cache + physical_block * BLOCK_BYTES +
+                                             V_OFFSET + token * KV_DIM * sizeof(nv_bfloat16) +
+                                             kv_head_idx * HEAD_DIM * sizeof(nv_bfloat16) +
+                                             thread_id * sizeof(nv_bfloat16));
             float qk = (float) q * (float) *k;
             // tree reduction within current warp, thread 0 gets sum of all 32 elements within warp
             // could be done with __syncthreads but accessing memory of other threads in warp is op
@@ -723,13 +744,14 @@ __global__ void pagedAttentionKernel(int layer,
 
 void pagedAttention(int layer,
                     int num_active_slots,
-                    __nv_bfloat16* q_proj,
-                    __nv_bfloat16* kv_cache,
+                    nv_bfloat16* q_proj,
+                    nv_bfloat16* kv_cache,
                     int* block_table_gpu,
                     int* gpu_seq_lens,
                     int* gpu_active_slots,
-                    __nv_bfloat16* output)
+                    nv_bfloat16* output)
 {
     pagedAttentionKernel<<<dim3(num_active_slots, NUM_Q_HEADS), HEAD_DIM>>>(
-        layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots, output);
+        layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots,
+        output);
 }

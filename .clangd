@@ -19,6 +19,5 @@ CompileFlags:
     - "-Xcompiler*"
     - "-Xcudafe*"
     - "--expt-*"
-
 Diagnostics:
-  UnusedIncludes: None
+  UnusedIncludes: Strict

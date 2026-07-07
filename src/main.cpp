@@ -4,9 +4,7 @@
 #define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include <ios>
 #include <ranges>
-#include <memory>
 #include <iostream>
-#include <numeric>
 #include <fstream>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -15,16 +13,12 @@
 #include <vector>
 #include <driver_types.h>
 #include <nlohmann/json.hpp>
-#include "kernels.cuh"
 #include "config.hpp"
 #include "inference.hpp"
 #include "weights.hpp"
 #include "cuda_utils.hpp"
-#include "utils.hpp"
-#include "debug.hpp"
 #include <CLI/CLI.hpp>
 #include <filesystem>
-#include <ranges>
 #include <string_view>
 
 int main(int argc, char* argv[])

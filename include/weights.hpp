@@ -1,7 +1,5 @@
 #pragma once
 #include <cuda_bf16.h>
-#include <iostream>
-#include <fstream>
 #include "config.hpp"
 
 struct Weights

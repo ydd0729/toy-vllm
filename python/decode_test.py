@@ -10,4 +10,4 @@ prompts = {
 }
 
 for prompt, tokens in prompts.items():
-    print(f"{prompt} → {t.decode(tokens)}")
+    print(f"{prompt} → {t.decode(tokens, clean_up_tokenization_spaces=False)}")

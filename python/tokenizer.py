@@ -27,7 +27,7 @@ def main():
     if args.decode:
         if not args.ids:
             parser.error("--decode requires --ids")
-        text = tokenizer.decode(args.ids)
+        text = tokenizer.decode(args.ids, clean_up_tokenization_spaces=False)
         print(text)
     else:
         if not args.text:

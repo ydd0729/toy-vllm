@@ -1,5 +1,6 @@
 #include "kernels.cuh"
 #include <iostream>
+#include <math_constants.h>
 #include "config.hpp"
 
 // =============================================================================
@@ -252,7 +253,7 @@ __global__ void causalMaskKernel(__nv_bfloat16* input, int num_tokens)
     if (column > row)
     {
         // 设为 -infinity，softmax 后变为 0
-        input[blockIdx.x * num_tokens + threadIdx.x] = -HUGE_VALF;
+        input[blockIdx.x * num_tokens + threadIdx.x] = -CUDART_INF_F;
     }
 }
 
@@ -662,7 +663,7 @@ __global__ void pagedAttentionKernel(int layer,
     int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     // for online softmax https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
-    float current_max = -INFINITY;
+    float current_max = -CUDART_INF_F;
     float acc = 0.0f;
     float d = 0.0f; // denominator, same name as in paper above
 

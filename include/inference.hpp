@@ -5,6 +5,8 @@
 #include <vector>
 #include <cuda_bf16.h>
 #include <cublas_v2.h>
+#include <queue>
+#include <weights.hpp>
 
 struct InferenceContext
 {
@@ -73,6 +75,7 @@ public:
     // ---- input ----
     std::vector<int> input_tokens_cpu; // current prompt's token ids (CPU)
     size_t input_token_len = 0;        // == input_tokens.size()（prefill 的 prompt 长度）
+
     // 本次前向处理的行数（token 数）：prefill = input_token_len，decode = 活跃序列数。
     // 各投影（qProj/kProj/vProj/oProj/swiGLU/lmHead）的 GEMM 行数统一读它。
     int num_rows = 0;
@@ -161,6 +164,10 @@ struct BatchState
 
     // 每个 slot 当前装的是第几个请求（按 prompt 入队/取出顺序，对应 PROMPT N）；-1 表示空闲
     std::vector<int> request_id;
+
+    // 每个 slot 对应的 prompt
+    std::vector<std::vector<int>> prompt;
+
     // 下一个请求编号，每次 prefill 取走一个 prompt 时分配并自增
     int next_request_id = 0;
 
@@ -170,3 +177,18 @@ struct BatchState
 
     BatchState();
 };
+
+struct RequestOutput {
+    int request_id;
+    std::vector<int> input_token;
+    std::vector<int> output_token;
+};
+
+void prefill(std::queue<std::vector<int>>& prompt_queue,
+             int slot,
+             InferenceContext& ctx,
+             PagedKVCache& pkv,
+             BatchState& bs,
+             Weights& w);
+
+std::vector<RequestOutput> decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w);

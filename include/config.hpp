@@ -1,6 +1,7 @@
 #pragma once
 #include <utility>
 #include <cuda_bf16.h>
+#include <filesystem>
 
 // =============================================================================
 // Model architecture — fixed by Llama 3.2 1B (from its config.json).
@@ -32,7 +33,7 @@ constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>
 // Runtime / deployment tuning — our choices, not dictated by the model.
 // Candidates to expose as CLI arguments later.
 // =============================================================================
-// Self-imposed max sequence length (input + output tokens). Model supports 128K. TODO: raise?
+// Self-imposed max sequence length (input + output tokens). Model supports 128K.
 constexpr int MAX_SEQ_LEN = 2048;
 // Self-imposed max prompt length. Model allows up to 2048 for input + output.
 constexpr int MAX_PROMPT_LEN = 512;
@@ -64,3 +65,10 @@ constexpr int BLOCK_BYTES = V_OFFSET * 2; // * 2 because K and V
 constexpr int MAX_BLOCKS_PER_SEQ = MAX_SEQ_LEN / BLOCK_SIZE;  // 2048 / 16 = 128
 constexpr int NUM_BLOCKS = KV_CACHE_SIZE_BYTES / BLOCK_BYTES; // 2*1024^3 / (16*512*2*2) = 65536
 constexpr int MAX_SEQUENCES = BATCH_SIZE;
+
+const std::filesystem::path model_path = std::filesystem::path("models");
+const std::filesystem::path llama3p2_1B_Instruct_path = model_path / "Llama-3.2-1B";
+const std::filesystem::path llama3p2_1B_Instruct_weights_path =
+    llama3p2_1B_Instruct_path / "model.safetensors";
+const std::filesystem::path llama3p2_1B_Instruct_tokenizer_path =
+    llama3p2_1B_Instruct_path / "tokenizer.json";

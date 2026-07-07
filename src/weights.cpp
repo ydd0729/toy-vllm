@@ -7,6 +7,7 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 #include <format>
+#include "config.hpp"
 #include <cuda_runtime.h>
 #include "cuda_utils.hpp"
 
@@ -26,15 +27,12 @@
  */
 Weights::Weights()
 {
-    std::filesystem::path weights_path =
-        std::filesystem::path("models") / "Llama-3.2-1B" / "model.safetensors";
-
-    std::ifstream safetensors_file(weights_path, std::ios_base::binary);
+    std::ifstream safetensors_file(llama3p2_1B_Instruct_weights_path, std::ios_base::binary);
 
     if (!safetensors_file.is_open())
     {
         throw std::runtime_error(
-            std::format("Can't open {}", weights_path.string()));
+            std::format("Can't open {}", llama3p2_1B_Instruct_weights_path.string()));
     }
 
     // 前 8 字节是 header 长度（uint64_t，小端序）

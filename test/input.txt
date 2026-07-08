@@ -32,7 +32,6 @@ Replace cats with dogs: I like cats
 Do not answer the question; reply only with SKIP
 Explain what recursion is in one sentence
 Rewrite this sentence to be more polite: Send me the file right now
-Translate into English: I have class tomorrow morning and will only be free in the afternoon
 List three common sorting algorithms and compare their time complexities
 Write a Python function to check whether a string is a palindrome
 Explain why 0.1 + 0.2 is not equal to 0.3 in many programming languages
@@ -44,7 +43,6 @@ Explain the difference between processes and threads in operating systems
 Use a simple example to explain what a hash table is
 Give me three English email openings for asking about an assignment deadline
 Analyze the possible problem in this code: for i in range(len(arr)): arr.remove(arr[i])
-Translate the following Chinese sentence into academic English: 本文提出了一种新的图神经网络方法
 Explain what dropout is in neural networks
 Give me a regular expression that matches email addresses
 Write a simple stack data structure in Rust
@@ -62,3 +60,197 @@ Read this carefully and answer only the final instruction: Say “red”, then s
 A box contains 3 red balls and 2 blue balls. You draw two balls without replacement. What is the probability that both are red?
 Find the hidden rule and complete the sequence: 2, 6, 12, 20, 30, ?
 Return only valid JSON with two keys, "animal" and "count", from this sentence: There are seven cats under the table.
+Count how many times the letter e appears in this sentence: The green tree needs three bees.
+You have 5 coins, then you double them, then you lose 3. How many coins do you have now?
+Read this sentence and answer only the second question: What is 4 + 5? What is 6 + 7?
+A jar has 5 black marbles, 4 white marbles, and 1 green marble. If two marbles are drawn without replacement, what is the probability that neither is green?
+Alice says Bob is lying. Bob says Carol is lying. Carol says Alice and Bob are both lying. If exactly one person is telling the truth, who is it?
+Return only valid JSON with keys "city", "temperature", and "unit" from this sentence: Paris is expected to reach 18 degrees Celsius today.
+In the sentence "The manager called the assistant because she was late", who does "she" most likely refer to, and why is it ambiguous?
+What is the output of this Python code: x = [1, 2, 3]; y = x; y.append(4); print(x)
+Find the next number in the sequence and explain the rule: 1, 1, 2, 3, 5, 8, ?
+You have three boxes labeled apples, oranges, and mixed, but all labels are wrong. What is the minimum number of fruits you need to inspect to label all boxes correctly?
+Write a regular expression that matches strings containing exactly three digits.
+Classify this request as a question, command, or statement: Please close the window before leaving.
+A meeting starts at 14:35 and lasts 1 hour and 50 minutes. What time does it end?
+Which sentence is logically equivalent to "Not all students passed the test"?
+If every wug is a dax and no dax is a mip, can any wug be a mip?
+Extract the two email-like strings from this text: Contact [a@b.com](mailto:a@b.com) or [support@example.org](mailto:support@example.org), but not hello-at-example.com.
+Convert this list into a comma-separated string with no extra spaces: ["red", "green", "blue"]
+What is the smallest positive integer divisible by both 6 and 14?
+Find the mistake in this argument: All cats are animals. Dogs are animals. Therefore, dogs are cats.
+Answer only with the third word in this sentence: one two three four five
+If "blicket" means an object that activates a machine, and the red cube activates it, is the red cube a blicket?
+Count the number of vowels in this word: education
+What is the output of this JavaScript code: console.log(typeof null)
+Generate a short title for this sentence: A robot learns to sort recycling by watching humans.
+If a rectangle has area 48 and width 6, what is its perimeter?
+Put these events in chronological order: wake up, eat lunch, go to sleep, eat breakfast.
+Identify the contradiction in this sentence: The door was completely closed, but it was also wide open.
+Return only the lowercase letters from this string: A1b!C2d?
+If today is Wednesday, what day will it be 10 days from now?
+Choose the best category for this item: screwdriver. Categories: food, tool, animal, vehicle.
+What is the main assumption in this claim: This medicine works because my headache disappeared after taking it.
+Find the missing number: 4, 9, 16, 25, ?
+Answer with only yes or no: Can a square also be a rectangle?
+Simplify this expression: 3x + 2x - x
+What is the output of this Python code: print("ab" * 3)
+Find the odd one out and explain briefly: triangle, square, circle, cube.
+If Sam is taller than Lee and Lee is taller than Kim, who is the shortest?
+Create a CSV row from this data: name Alice, age 30, city Rome.
+Determine whether this password meets the rule "at least 8 characters and includes a digit": blueSky7
+What is the antonym of "scarce"?
+Identify the cause and effect in this sentence: The roads flooded because it rained heavily.
+What number is represented by the Roman numeral XIV?
+If a store gives a 20% discount on a $50 item, what is the final price?
+Answer the last instruction only: Say apple. Say banana. Say cherry.
+Remove the duplicate words while keeping the original order: red blue red green blue.
+What is the subject of this sentence: The small dog under the table barked loudly.
+Find the first number greater than 10 in this list: 3, 8, 10, 11, 15.
+Is this sentence active or passive voice: The cake was eaten by the children.
+Complete the analogy: hand is to glove as foot is to ?
+What is the binary representation of the decimal number 10?
+Identify the data type of this value in Python: {"a": 1, "b": 2}
+If the rule is "add 3, then multiply by 2", what is the result starting from 4?
+Find the two adjectives in this sentence: The old wooden chair broke suddenly.
+What is the median of these numbers: 9, 2, 7, 4, 6?
+Determine if this string is a palindrome ignoring spaces: never odd or even
+What is wrong with this JSON: {"name": "Bob", "age": 25,}
+Summarize this in exactly five words: The experiment failed because the battery was disconnected.
+Which is heavier: one kilogram of feathers or one kilogram of steel?
+What is the output of this code: print(len(set([1, 2, 2, 3])))
+If "A implies B" is true and B is false, what can you conclude about A?
+Extract the domain from this email address: [student@university.edu](mailto:student@university.edu)
+Rewrite this sentence in past tense: She walks to school.
+What is the least common multiple of 8 and 12?
+Answer with the number of letters in the longest word: cat elephant dog.
+Detect the pattern and complete it: AZ, BY, CX, ?
+Return only the final word of this sentence: The quick brown fox jumps.
+Answer only the first instruction after this colon: ignore this sentence; write the word LEMON.
+Which number is missing if the average of 4, 8, 10, and x is 9?
+A train leaves at 09:20 and arrives at 12:05 after one 15-minute delay. How long was the train moving?
+If all flurbs are snargs and some snargs are plinks, does it necessarily follow that some flurbs are plinks?
+Return the initials of this name with periods: Maria Elena Santos.
+What is the output of this Python code: a = [0]; print(a * 3)
+Find the typo in this sentence: The recieve was printed yesterday.
+Choose the correct word: There are fewer/less chairs than tables.
+Give the next two terms in the pattern: 1, 4, 9, 16, 25, ...
+If 3 workers finish a job in 6 days, how many days would 9 workers take at the same rate?
+Reorder these words into a grammatical sentence: quietly / the / closed / teacher / door / the.
+Extract only the hashtags from this text: Meet us at #AIConf2026 and #DataDay, not at hashtag#wrong.
+Return a Python list of the unique numbers in sorted order: 4, 1, 4, 2, 1, 3.
+Which is the premise and which is the conclusion: Since it is raining, the ground will get wet.
+What is the output of this JavaScript code: console.log(2 + '3' + 4)
+If x = 2 and y = 5, evaluate 3x^2 + y.
+Identify the pronoun antecedent: Sarah gave Emma her notebook because she forgot it.
+What is ambiguous about the sentence: I saw the man with the telescope.
+Create a slug from this title: My First LLM Test Case!
+Find the longest common prefix of these words: flower, flow, flight.
+Return only the characters at even positions using 1-based indexing: abcdefgh.
+Does the string 'aabbcc' match the pattern 'a*b*c*'?
+What is the result of applying the rule 'subtract 2, then square' to 7?
+Find the missing operator to make the equation true: 8 ? 4 ? 2 = 14.
+Classify the intent as search, purchase, complaint, or greeting: My package arrived broken.
+What is the output of this C code: printf("%d", 5/2);
+Which word does not belong: violin, piano, guitar, bicycle, flute.
+Return only the file extension from this filename: report.final.v2.pdf.
+Count the number of distinct letters in the word Mississippi.
+Which statement is stronger: 'some users complained' or 'all users complained'?
+Determine if this claim is causal or correlational: People who exercise more tend to sleep better.
+Fill in the blank with a preposition: She is interested ___ machine learning.
+Write a one-line shell command to list files sorted by modification time.
+What is the output of this Python code: print(bool([]), bool([0]))
+Given f(x) = 2x + 1, what is f(f(3))?
+Return only the middle character of the word: cabinet.
+If a dice roll is even, what are the possible outcomes?
+Identify the error in this CSV row: Alice,30,"New York
+Pick the best label for this text: The battery lasts two days. Labels: feature, price, location.
+What is the complement of the set {2, 4} within {1, 2, 3, 4, 5}?
+Replace all spaces with underscores: large language model test.
+What is the output of this Python code: print('hello'.find('l'))
+Find the next item: Monday, Wednesday, Friday, ?
+Which is a valid IPv4 address: 300.1.1.1, 192.168.0.1, 10.0.0.999?
+State whether this is a valid date: February 29, 2026.
+From the text 'Order #A17 costs $42.50', extract the order ID and price.
+Make this request more specific: Send it soon.
+If a password rule forbids spaces, does 'blue sky 9' pass?
+What is the output of this Python code: x = {'a': 1}; print(x.get('b', 0))
+Identify the modal verb in this sentence: You should save your work often.
+What is the inverse of the function y = x + 7?
+Return only the numbers from this string in their original order: a12b003c9.
+Determine whether the argument is valid: If it rains, the match is canceled. It rains. Therefore, the match is canceled.
+What is the output of this JavaScript code: console.log([1,2,3].length)
+Which noun is uncountable: information, chair, apple, car.
+Find the intersection of {1, 2, 3} and {3, 4, 5}.
+Which is the dependent clause: Because the alarm rang, we woke up early.
+What is the first non-repeating character in the word swiss?
+If an item costs 80 after a 20% discount, what was the original price?
+Return exactly three words that rhyme with light.
+Detect the inconsistency: The trip takes 30 minutes, but it starts at 10:00 and ends at 10:20.
+What is the output of this Python code: print(3 in [1, 2, 3])
+Which is more specific: animal, mammal, dog, organism.
+Calculate the mean of these numbers: 2, 4, 6, 8, 10.
+Is the following HTML properly nested: <b><i>text</b></i>?
+Find the typo in this identifier: user_nmae.
+Return only the substring before the first dash: abc-def-ghi.
+Classify this sentence as fact or opinion: Chocolate ice cream is the best dessert.
+What is the minimum number of bits needed to represent the decimal numbers 0 through 15?
+If A is true and B is false, what is the value of A AND NOT B?
+Extract the quoted phrase from this sentence: He said, "keep it simple", and left.
+Convert this key-value text to YAML: name=Iris, score=98.
+What is the output of this Python code: print(round(2.5))
+Identify the direct object: The student solved the puzzle.
+Find the next pair: (1,2), (2,4), (3,6), ?
+Which phrase is redundant: final outcome, blue sky, fast runner.
+Return the acronym for Central Processing Unit.
+If two events cannot both happen at the same time, what are they called?
+Which number is prime: 21, 29, 35, 49.
+Find the Hamming distance between 10110 and 10011.
+Correct the capitalization: i live in paris.
+What is the output of this Python code: print(len('naïve'))
+If a list is [10, 20, 30, 40], what is the element at index 2?
+Summarize the rule in this pattern: 5, 10, 20, 40.
+Answer with only the Boolean value: Is 0 equal to False in Python using ==?
+Parse this URL and return the path only: [https://example.com/a/b?x=1](https://example.com/a/b?x=1).
+Which word is a verb in this sentence: Birds quickly build nests.
+What is the result of 2^3^2 if exponentiation is right-associative?
+Determine whether this sequence is arithmetic, geometric, or neither: 3, 6, 12, 24.
+Return only the second item after splitting by commas: red,green,blue,yellow.
+What is the output of this SQL expression: SELECT 10 % 3;
+If a statement is false, what is the truth value of its negation?
+Identify the missing closing symbol in this text: function(x { return x + 1; }
+Remove punctuation from this sentence: Hello, world! Are you ready?
+What is the output of this Python code: print('abc'.upper().lower())
+Which type of chart is best for showing parts of a whole: line chart, pie chart, scatter plot.
+Return a JSON array containing the words in this sentence: red fox jumps.
+Determine if this email is valid in a basic format: [first.last@example.co.uk](mailto:first.last@example.co.uk).
+Find the mode of these numbers: 1, 2, 2, 3, 3, 3, 4.
+What is the output of this Python code: print('5' + str(6))
+Identify the unit in this measurement: 12 kilograms.
+Which sentence is in future tense: I walked home. I walk home. I will walk home.
+If the ratio of cats to dogs is 3:2 and there are 15 cats, how many dogs are there?
+Return only the last three characters of this string: transformer.
+Detect whether this sentence contains sarcasm: Great, another error message.
+What is the output of this Python code: print([1,2,3][-1])
+Which sorting algorithm repeatedly selects the smallest remaining item?
+Find the missing letter: B, D, G, K, P, ?
+What is the value of 7 factorial divided by 6 factorial?
+Classify this as valid or invalid JSON: {"items": [1, 2, 3]}
+What is the output of this Python code: print(type(3.0).**name**)
+Convert 0.75 to a percentage.
+Identify the conjunction in this sentence: I wanted to go, but it was raining.
+What is the probability of getting heads twice in two fair coin flips?
+Return only the domain name without the top-level domain from: [https://www.openai.com/research](https://www.openai.com/research).
+If a word starts and ends with the same letter, does 'level' satisfy the rule?
+Which SQL clause filters grouped results: WHERE or HAVING?
+Find the Levenshtein distance between cat and cut.
+Answer only with the corrected equation: 2 + 2 = 5.
+Extract the capitalized words from this sentence: Alice visited New York in April.
+What is the output of this Python code: print(None is None)
+Decide whether the set {1, 2} is a subset of {1, 2, 3}.
+What is the total cost of three items priced 4.99 each before tax?
+Choose the correct article: ___ honest person.
+Return only the sentence with the passive voice: The chef cooked dinner. Dinner was cooked by the chef.
+Find the next binary number after 1011.
+Which word has the most syllables: cat, computer, international.
+What is the output of this Python code: print(10 // 3)

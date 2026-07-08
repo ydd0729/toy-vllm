@@ -18,17 +18,25 @@
       }
     },
     {
-      "name": "debug",
+      "name": "Debug",
       "inherits": "ninja-base",
-      "displayName": "Ninja Debug",
+      "displayName": "Debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
-      "name": "release",
+      "name": "RelWithDebInfo",
       "inherits": "ninja-base",
-      "displayName": "Ninja Release",
+      "displayName": "RelWithDebInfo",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "Release",
+      "inherits": "ninja-base",
+      "displayName": "Release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -36,12 +44,16 @@
   ],
   "buildPresets": [
     {
-      "name": "debug",
-      "configurePreset": "debug"
+      "name": "Debug",
+      "configurePreset": "Debug"
     },
     {
-      "name": "release",
-      "configurePreset": "release"
+      "name": "RelWithDebInfo",
+      "configurePreset": "RelWithDebInfo"
+    },
+    {
+      "name": "Release",
+      "configurePreset": "Release"
     }
   ]
 }

@@ -543,6 +543,7 @@ void prefill(std::queue<std::string>& input_queue,
             int physical_block_idx = pkv.getPhysicalBlock(slot, layer, logical_block_idx);
             if (physical_block_idx == -1)
             {
+                // TODO: free blocks 可能耗尽，但现在的设置一定够用
                 physical_block_idx = pkv.getFreePhysicalBlock();
                 pkv.setPhysicalBlock(slot, layer, logical_block_idx, physical_block_idx);
             }

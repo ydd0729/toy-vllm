@@ -123,7 +123,7 @@ public:
 struct PagedKVCache
 {
 public:
-    // kv_cache: 2GB GPU 显存池，存储所有序列、所有层的 K/V 张量，按固定大小的 block 划分
+    // kv_cache: GPU 显存池，存储所有序列、所有层的 K/V 张量，按固定大小的 block 划分
     nv_bfloat16* kv_cache;
 
     // free_blocks: 可用物理 block 索引列表（0~NUM_BLOCKS-1），分配时 pop，释放时 push

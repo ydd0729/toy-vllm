@@ -592,8 +592,9 @@ void prefill(std::queue<std::string>& input_queue,
 
     // argmax to get the output token
     // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
-    cudaMemcpy(ctx.logits_cpu.data(), ctx.logits,
-               sizeof(__nv_bfloat16) * ctx.input_token_len * VOCAB_SIZE, cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(ctx.logits_cpu.data(), ctx.logits,
+                          sizeof(__nv_bfloat16) * ctx.input_token_len * VOCAB_SIZE,
+                          cudaMemcpyDeviceToHost));
     int last_token_offset = (ctx.input_token_len - 1) * VOCAB_SIZE;
     float max_logit = (float) ctx.logits_cpu[last_token_offset];
     int max_token_idx = 0;
@@ -613,8 +614,9 @@ void prefill(std::queue<std::string>& input_queue,
 
     // synchronize state of block_table with block_table_gpu
     // TODO: do it more clever and not copy full table unnecessarily
-    cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
-               MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
+                          MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
+                          cudaMemcpyHostToDevice));
 }
 
 /**
@@ -647,10 +649,10 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
     int num_active_slots = bs.active_slots.size();
 
     // copy useful data to gpu
-    cudaMemcpy(ctx.last_tokens, bs.active_tokens.data(), num_active_slots * sizeof(int),
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(ctx.active_slots, bs.active_slots.data(), num_active_slots * sizeof(int),
-               cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(ctx.last_tokens, bs.active_tokens.data(), num_active_slots * sizeof(int),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx.active_slots, bs.active_slots.data(), num_active_slots * sizeof(int),
+                          cudaMemcpyHostToDevice));
 
     std::vector<int> seq_lens(num_active_slots);
 
@@ -659,8 +661,8 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
         int active_slot = bs.active_slots[slot];
         seq_lens[slot] = bs.current_prompt_len[active_slot] + 1;
     }
-    cudaMemcpy(ctx.seq_lens, seq_lens.data(), seq_lens.size() * sizeof(int),
-               cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(ctx.seq_lens, seq_lens.data(), seq_lens.size() * sizeof(int),
+                          cudaMemcpyHostToDevice));
 
     embeddingGatherDecode(ctx.last_tokens, num_active_slots, ctx.hidden_state, w.embed_tokens);
 
@@ -708,10 +710,11 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
                         token_in_block_idx);
         }
 
+        // TODO:
         // synchronize block table on cpu with block table on gpu (for attention)
-        cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
-                   MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
-                   cudaMemcpyHostToDevice);
+        CUDA_CHECK(cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
+                              MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
+                              cudaMemcpyHostToDevice));
 
         // 注意力输出写入 ctx.context（= scratch_a），供 oProj 读取
         ctx.context = ctx.scratch_a;
@@ -734,8 +737,9 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
 
     ctx.lmHead(w.embed_tokens);
 
-    cudaMemcpy(ctx.logits_cpu.data(), ctx.logits,
-               sizeof(nv_bfloat16) * num_active_slots * VOCAB_SIZE, cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(ctx.logits_cpu.data(), ctx.logits,
+                          sizeof(nv_bfloat16) * num_active_slots * VOCAB_SIZE,
+                          cudaMemcpyDeviceToHost));
 
     float max_logit = 0.0;
     int max_token_idx = 0;
@@ -775,9 +779,11 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
                     }
                 }
             }
-            cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
-                       MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
-                       cudaMemcpyHostToDevice);
+
+            // TODO:
+            CUDA_CHECK(cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
+                                  MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
+                                  cudaMemcpyHostToDevice));
         }
         else
         {

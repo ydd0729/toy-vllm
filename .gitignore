@@ -55,6 +55,8 @@ docs/
 .vscode/
 cmake-build-*
 .idea/
-models/
-test/
+models/*
+test/*
 !test/input.txt
+profile/
+!*/.gitkeep

@@ -111,7 +111,8 @@ public:
 
     // ---- output logits ----
     nv_bfloat16* logits;                 // logits on GPU (hidden * embed_tokens^T)
-    std::vector<nv_bfloat16> logits_cpu; // logits copied back to CPU for argmax
+    int* arg_max_idx;
+    std::vector<int> arg_max_idx_cpu;
 
     // ---- decode-only: per-active-slot GPU staging (mirrors CPU batch vectors) ----
     int* last_tokens;  // last generated token id per active slot (fed to embeddingGatherDecode)

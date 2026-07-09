@@ -17,6 +17,7 @@ void causalMask(nv_bfloat16* input, int num_tokens);
 void softmax(nv_bfloat16* input, int num_tokens);
 void residualAdd(nv_bfloat16* input, nv_bfloat16* input_embeds, int num_tokens);
 void silu(nv_bfloat16* a, nv_bfloat16* b, int num_tokens);
+void argMax(nv_bfloat16* logits, int* out, int num_active_slots);
 
 // =============================================================================
 //                                  Decode

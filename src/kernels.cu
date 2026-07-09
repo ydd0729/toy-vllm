@@ -364,6 +364,63 @@ void causalMask(nv_bfloat16* input, int num_tokens)
 #endif
 }
 
+__global__ void argMaxKernel(nv_bfloat16* logits, int* out)
+{
+    int row = blockIdx.x;
+    nv_bfloat16* row_logits = logits + row * VOCAB_SIZE;
+
+    float max_logit = -CUDART_INF_F;
+    int max_logit_idx = -1;
+    for (int i = threadIdx.x; i < VOCAB_SIZE; i += blockDim.x)
+    {
+        float logit = (float) row_logits[i];
+        if (logit > max_logit || logit == max_logit && i < max_logit_idx)
+        {
+            max_logit = logit;
+            max_logit_idx = i;
+        }
+    }
+
+    __shared__ int max_idx[1024];
+    __shared__ float max_val[1024];
+
+    max_idx[threadIdx.x] = max_logit_idx;
+    max_val[threadIdx.x] = max_logit;
+
+    __syncthreads();
+
+    for (int i = 1; i < blockDim.x; i <<= 1)
+    {
+        if (threadIdx.x % (i * 2) == 0 && threadIdx.x + i < blockDim.x &&
+            (max_val[threadIdx.x] < max_val[threadIdx.x + i] ||
+             max_val[threadIdx.x] == max_val[threadIdx.x + i] &&
+                 max_idx[threadIdx.x] > max_idx[threadIdx.x + i]))
+        {
+            max_val[threadIdx.x] = max_val[threadIdx.x + i];
+            max_idx[threadIdx.x] = max_idx[threadIdx.x + i];
+        }
+
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0)
+    {
+        out[row] = max_idx[0];
+    }
+}
+
+void argMax(nv_bfloat16* logits, int* out, int num_active_slots)
+{
+    argMaxKernel<<<num_active_slots, 1024>>>(logits, out);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+
 /**
  * @brief Softmax 归一化：对注意力分数矩阵的每一行执行数值稳定的 softmax
  *

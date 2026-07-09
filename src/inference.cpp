@@ -47,7 +47,7 @@ std::unique_ptr<Tokenizer> load_tokenizer()
     return Tokenizer::FromBlobJSON(blob);
 }
 
-InferenceContext::InferenceContext()
+InferenceContext::InferenceContext() : arg_max_idx_cpu(BATCH_SIZE)
 {
     // Create the cuBLAS context. cublas_handle is required by every cublasGemmEx
     // call; cublasCreate allocates GPU-side resources for it. If this fails
@@ -58,8 +58,6 @@ InferenceContext::InferenceContext()
         std::cerr << "cuBLAS init failed, status: " << status << "\n";
         throw std::runtime_error("cuBLAS init failed");
     }
-
-    logits_cpu.resize(EMBED_PROJ_LEN);
 
     CUDA_CHECK(cudaMalloc(&input_tokens, INPUT_TOKENS_BYTES));
     CUDA_CHECK(cudaMalloc(&input_embeddings, INPUT_EMBEDDINGS_BYTES));
@@ -76,6 +74,7 @@ InferenceContext::InferenceContext()
     CUDA_CHECK(cudaMalloc(&last_tokens, BATCH_INT_BYTES));
     CUDA_CHECK(cudaMalloc(&active_slots, BATCH_INT_BYTES));
     CUDA_CHECK(cudaMalloc(&seq_lens, BATCH_INT_BYTES));
+    CUDA_CHECK(cudaMalloc(&arg_max_idx, BATCH_INT_BYTES));
 
     tok = load_tokenizer();
 }
@@ -98,6 +97,7 @@ InferenceContext::~InferenceContext()
     CUDA_CHECK_NOTHROW(cudaFree(last_tokens));
     CUDA_CHECK_NOTHROW(cudaFree(active_slots));
     CUDA_CHECK_NOTHROW(cudaFree(seq_lens));
+    CUDA_CHECK_NOTHROW(cudaFree(arg_max_idx));
 }
 
 std::string InferenceContext::apply_chat_template(const std::string& user_msg)
@@ -580,23 +580,11 @@ void prefill(std::queue<Request>& request_queue,
 
     ctx.lmHead(w.embed_tokens);
 
-    // argmax to get the output token
-    // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
-    CUDA_CHECK(cudaMemcpy(ctx.logits_cpu.data(), ctx.logits,
-                          sizeof(__nv_bfloat16) * ctx.input_token_len * VOCAB_SIZE,
-                          cudaMemcpyDeviceToHost));
-    int last_token_offset = (ctx.input_token_len - 1) * VOCAB_SIZE;
-    float max_logit = (float) ctx.logits_cpu[last_token_offset];
-    int max_token_idx = 0;
-    for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
-    {
-        if ((float) ctx.logits_cpu[token_idx + last_token_offset] > max_logit)
-        {
-            max_logit = ctx.logits_cpu[token_idx + last_token_offset];
-            max_token_idx = token_idx;
-        }
-    }
-    // std::cout << "output token: " << max_token_idx << ", max logit: " << max_logit << std::endl;
+    size_t last_token_offset = (ctx.input_token_len - 1) * VOCAB_SIZE;
+    argMax(ctx.logits + last_token_offset, ctx.arg_max_idx, 1);
+
+    int max_token_idx;
+    CUDA_CHECK(cudaMemcpy(&max_token_idx, ctx.arg_max_idx, sizeof(int), cudaMemcpyDeviceToHost));
 
     bs.generated_tokens[slot].push_back(max_token_idx);
     bs.last_generated_tokens[slot] = max_token_idx;
@@ -730,26 +718,14 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
 
     ctx.lmHead(w.embed_tokens);
 
-    CUDA_CHECK(cudaMemcpy(ctx.logits_cpu.data(), ctx.logits,
-                          sizeof(nv_bfloat16) * num_active_slots * VOCAB_SIZE,
-                          cudaMemcpyDeviceToHost));
+    argMax(ctx.logits, ctx.arg_max_idx, num_active_slots);
+    CUDA_CHECK(cudaMemcpy(ctx.arg_max_idx_cpu.data(), ctx.arg_max_idx, sizeof(int) * num_active_slots, cudaMemcpyDeviceToHost));
 
-    float max_logit = 0.0;
-    int max_token_idx = 0;
-    for (int slot = 0; slot < num_active_slots; ++slot)
+    for (int i = 0; i < num_active_slots; ++i)
     {
-        int active_slot = bs.active_slots[slot];
-        max_logit = (float) ctx.logits_cpu[slot * VOCAB_SIZE];
-        max_token_idx = 0;
-        for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
-        {
-            if ((float) ctx.logits_cpu[slot * VOCAB_SIZE + token_idx] > max_logit)
-            {
-                max_logit = (float) ctx.logits_cpu[slot * VOCAB_SIZE + token_idx];
-                max_token_idx = token_idx;
-            }
-        }
-
+        int active_slot = bs.active_slots[i];
+        int max_token_idx = ctx.arg_max_idx_cpu[i];
+        
         if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID ||
             bs.current_prompt_len[active_slot] == MAX_SEQ_LEN - 1)
         {

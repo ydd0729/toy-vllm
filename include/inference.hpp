@@ -152,6 +152,7 @@ public:
                  int src_token_offset,
                  int token_len,
                  int token_in_block = 0);
+    void freeBlocks(int slot);
 };
 
 struct Request
@@ -190,6 +191,8 @@ struct BatchState
     std::vector<int> active_tokens;
 
     BatchState();
+    int getActiveSlotWithLeastGeneratedTokens(int slotToExclude);
+    Request freeSlot(int slotToFree, PagedKVCache& pkv);
 };
 
 void prefill(std::queue<Request>& request_queue,

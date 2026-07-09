@@ -385,6 +385,11 @@ PagedKVCache::~PagedKVCache()
 
 int PagedKVCache::getFreePhysicalBlock()
 {
+    if (free_blocks.empty())
+    {
+        return -1;
+    }
+
     int physical_block_idx = free_blocks.back();
     free_blocks.pop_back();
     return physical_block_idx;
@@ -438,6 +443,23 @@ void PagedKVCache::cacheKV(int physical_block,
                           cudaMemcpyDeviceToDevice));
 }
 
+void PagedKVCache::freeBlocks(int slot)
+{
+    for (int layer = 0; layer < N_LAYERS; ++layer)
+    {
+        for (int logical_block_idx = 0; logical_block_idx < MAX_BLOCKS_PER_SEQ; ++logical_block_idx)
+        {
+            int block_idx = slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ +
+                            logical_block_idx;
+            if (block_table[block_idx] != -1)
+            {
+                free_blocks.push_back(block_table[block_idx]);
+                block_table[block_idx] = -1;
+            }
+        }
+    }
+}
+
 BatchState::BatchState()
     : is_slot_free(BATCH_SIZE, true), generated_tokens(BATCH_SIZE),
       last_generated_tokens(BATCH_SIZE), current_prompt_len(BATCH_SIZE, 0), requests(BATCH_SIZE)
@@ -445,7 +467,45 @@ BatchState::BatchState()
 {
 }
 
+int BatchState::getActiveSlotWithLeastGeneratedTokens(int slotToExclude)
+{
+    int slot = -1;
+    unsigned long long min_len = std::numeric_limits<unsigned long long>::max();
+    for (int i = 0; i < BATCH_SIZE; i++)
+    {
+        if (is_slot_free[i] || i == slotToExclude)
+        {
+            continue;
+        }
 
+        if (min_len > generated_tokens[i].size())
+        {
+            slot = i;
+            min_len = generated_tokens[i].size();
+        }
+    }
+    return slot;
+}
+
+Request BatchState::freeSlot(int slotToFree, PagedKVCache& pkv)
+{
+    pkv.freeBlocks(slotToFree);
+
+    is_slot_free[slotToFree] = true;
+    generated_tokens[slotToFree].clear();
+    last_generated_tokens[slotToFree] = 0;
+    current_prompt_len[slotToFree] = 0;
+
+    auto it = std::find(active_slots.begin(), active_slots.end(), slotToFree);
+    if (it != active_slots.end())
+    {
+        auto idx = it - active_slots.begin();
+        active_slots.erase(it);
+        active_tokens.erase(active_tokens.begin() + idx);
+    }
+
+    return requests[slotToFree];
+}
 
 /**
  * @brief Prefill 阶段：一次性处理整个 prompt，填充 KV Cache 并生成第一个 token
@@ -533,8 +593,25 @@ void prefill(std::queue<Request>& request_queue,
             int physical_block_idx = pkv.getPhysicalBlock(slot, layer, logical_block_idx);
             if (physical_block_idx == -1)
             {
-                // TODO: free blocks 可能耗尽，但现在的设置一定够用
                 physical_block_idx = pkv.getFreePhysicalBlock();
+
+                if (physical_block_idx == -1)
+                {
+                    int slotToFree = bs.getActiveSlotWithLeastGeneratedTokens(slot);
+                    if (slotToFree == -1)
+                    {
+                        UNREACHABLE("No slot to free!!!");
+                    }
+                    Request r = bs.freeSlot(slotToFree, pkv);
+                    std::cout << "free slot " << slotToFree << std::endl;
+
+                    request_queue.emplace(std::move(r));
+                    physical_block_idx = pkv.getFreePhysicalBlock();
+                    if (physical_block_idx == -1)
+                    {
+                        UNREACHABLE("physical_block_idx cannot be -1 here");
+                    }
+                }
                 pkv.setPhysicalBlock(slot, layer, logical_block_idx, physical_block_idx);
             }
             else
@@ -627,7 +704,40 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
                                   Weights& w)
 {
     std::vector<RequestOutput> out;
+
+    size_t required_blocks = 0;
+    for (int active_slot : bs.active_slots)
+    {
+        if (bs.current_prompt_len[active_slot] % BLOCK_SIZE == 0)
+        {
+            required_blocks += N_LAYERS;
+        }
+    }
+
+    while (required_blocks > pkv.free_blocks.size())
+    {
+        int slotToFree = bs.getActiveSlotWithLeastGeneratedTokens(-1);
+        if (slotToFree == -1)
+        {
+            UNREACHABLE("No slot to free in decode!!!");
+        }
+        if (bs.current_prompt_len[slotToFree] % BLOCK_SIZE == 0)
+        {
+            required_blocks -= N_LAYERS;
+        }
+        Request r = bs.freeSlot(slotToFree, pkv);
+        request_queue.emplace(std::move(r));
+
+        std::cout << "free slot " << slotToFree << std::endl;
+    }
+
     int num_active_slots = bs.active_slots.size();
+    if (num_active_slots == 0)
+    {
+        std::cerr << "[WARN] decode: all active slots were evicted due to KV cache block "
+                     "exhaustion, skipping this decode step\n";
+        return out;
+    }
 
     // copy useful data to gpu
     CUDA_CHECK(cudaMemcpy(ctx.last_tokens, bs.active_tokens.data(), num_active_slots * sizeof(int),
@@ -682,6 +792,10 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
             if (physical_block_idx == -1)
             {
                 physical_block_idx = pkv.getFreePhysicalBlock();
+                if (physical_block_idx == -1)
+                {
+                    UNREACHABLE("physical_block_idx should not be -1");
+                }
                 pkv.setPhysicalBlock(active_slot, layer, logical_block_idx, physical_block_idx);
             }
 
@@ -734,20 +848,7 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
                              bs.generated_tokens[active_slot]);
 
             bs.is_slot_free[active_slot] = true;
-            for (int layer = 0; layer < N_LAYERS; ++layer)
-            {
-                for (int logical_block_idx = 0; logical_block_idx < MAX_BLOCKS_PER_SEQ;
-                     ++logical_block_idx)
-                {
-                    int block_idx = active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ +
-                                    layer * MAX_BLOCKS_PER_SEQ + logical_block_idx;
-                    if (pkv.block_table[block_idx] != -1)
-                    {
-                        pkv.free_blocks.push_back(pkv.block_table[block_idx]);
-                        pkv.block_table[block_idx] = -1;
-                    }
-                }
-            }
+            pkv.freeBlocks(active_slot);
 
             // TODO:
             CUDA_CHECK(cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),

@@ -1,5 +1,5 @@
 CompileFlags:
-  CompilationDatabase: build/debug
+  CompilationDatabase: build
   Add:
     # 补回被丢掉的 CUDA 头文件搜索路径（MSVC 的 -external:I 不被 clangd 识别）
     - "-IC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2/include"

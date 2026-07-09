@@ -50,7 +50,7 @@ int main(int argc, char* argv[])
     user_messages.resize(size);
     user_message_file.read(user_messages.data(), size);
 
-    std::queue<std::string> input_queue;
+    std::vector<std::string> inputs;
     for (auto line_range : user_messages | std::views::split('\n'))
     {
         std::string_view line(line_range.begin(), line_range.end());
@@ -63,7 +63,7 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        input_queue.emplace(line);
+        inputs.emplace_back(line);
     }
 
     auto start = std::chrono::steady_clock::now();
@@ -72,7 +72,13 @@ int main(int argc, char* argv[])
     BatchState bs;
     PagedKVCache pkv;
     InferenceContext ctx;
-    std::vector<RequestOutput> output;
+    std::vector<RequestOutput> outputs;
+    std::queue<Request> request_queue;
+
+    for (unsigned int request_id = 0; request_id < inputs.size(); request_id++)
+    {
+        request_queue.emplace(request_id, inputs[request_id], ctx.tok->Encode(InferenceContext::apply_chat_template(inputs[request_id])));
+    }
 
     while (true)
     {
@@ -83,12 +89,12 @@ int main(int argc, char* argv[])
         {
             if (bs.is_slot_free[slot])
             {
-                if (input_queue.empty())
+                if (request_queue.empty())
                 {
                     continue;
                 }
                 bs.generated_tokens[slot].clear();
-                prefill(input_queue, slot, ctx, pkv, bs, w);
+                prefill(request_queue, slot, ctx, pkv, bs, w);
             }
             bs.active_slots.push_back(slot);
             bs.active_tokens.push_back(bs.last_generated_tokens[slot]);
@@ -96,35 +102,35 @@ int main(int argc, char* argv[])
 
         if (bs.active_slots.size() == 0)
         {
-            if (input_queue.empty())
+            if (request_queue.empty())
             {
                 break;
             }
             continue;
         }
 
-        auto out = decode(ctx, pkv, bs, w);
-        output.insert(output.end(), std::make_move_iterator(out.begin()),
-                      std::make_move_iterator(out.end()));
+        auto out = decode(request_queue, ctx, pkv, bs, w);
+        outputs.insert(outputs.end(), std::make_move_iterator(out.begin()),
+                       std::make_move_iterator(out.end()));
     }
 
     auto end = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration<double>(end - start);
     std::cout << "Elapsed: " << elapsed.count() << " s" << std::endl;
 
-    sort(output.begin(), output.end(),
+    sort(outputs.begin(), outputs.end(),
          [](const auto& a, const auto& b)
          {
-             return a.request_id < b.request_id;
+             return a.request.request_id < b.request.request_id;
          });
 
     std::ostringstream buffer;
     const std::string sep(44, '=');
 
-    for (const auto& o : output)
+    for (const auto& o : outputs)
     {
-        buffer << sep << " Request " << std::setw(2) << o.request_id << " " << sep << "\n\n"
-               << "Q: " << o.input_message << "\n"
+        buffer << sep << " Request " << std::setw(2) << o.request.request_id << " " << sep << "\n\n"
+               << "Q: " << o.request.input_message << "\n"
                << "A: " << o.output_message << "\n\n";
 
         // std::cout << "  Q Tokens: ";

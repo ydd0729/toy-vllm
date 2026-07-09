@@ -13,6 +13,8 @@
 struct InferenceContext
 {
 public:
+    static std::string apply_chat_template(const std::string& user_msg);
+
     InferenceContext();
     ~InferenceContext();
     InferenceContext(const InferenceContext&) = delete;
@@ -70,7 +72,6 @@ public:
         this->input_tokens_cpu = input_tokens;
     }
 
-public:
     // cuBLAS context handle used by every GEMM below
     cublasHandle_t cublas_handle;
 
@@ -152,6 +153,20 @@ public:
                  int token_in_block = 0);
 };
 
+struct Request
+{
+    int request_id;
+    std::string input_message;
+    std::vector<int> input_tokens;
+};
+
+struct RequestOutput
+{
+    Request request;
+    std::string output_message;
+    std::vector<int> output_token;
+};
+
 struct BatchState
 {
     // batch 中各 slot 的空闲状态
@@ -167,15 +182,7 @@ struct BatchState
     std::vector<int> current_prompt_len;
 
     // 每个 slot 当前装的是第几个请求（按 prompt 入队/取出顺序，对应 PROMPT N）；-1 表示空闲
-    std::vector<int> request_id;
-
-    // 每个 slot 对应的 prompt
-    std::vector<std::vector<int>> input_tokens;
-
-    std::vector<std::string> input_message;
-
-    // 下一个请求编号，每次 prefill 取走一个 prompt 时分配并自增
-    int next_request_id = 0;
+    std::vector<Request> requests;
 
     // needed to provide contiguous data for decode
     std::vector<int> active_slots;
@@ -184,21 +191,15 @@ struct BatchState
     BatchState();
 };
 
-struct RequestOutput
-{
-    int request_id;
-    std::string input_message;
-    std::string output_message;
-    std::vector<int> input_token;
-    std::vector<int> output_token;
-};
-
-void prefill(std::queue<std::string>& prompt_queue,
+void prefill(std::queue<Request>& request_queue,
              int slot,
              InferenceContext& ctx,
              PagedKVCache& pkv,
              BatchState& bs,
              Weights& w);
 
-std::vector<RequestOutput>
-decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w);
+std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
+                                  InferenceContext& ctx,
+                                  PagedKVCache& pkv,
+                                  BatchState& bs,
+                                  Weights& w);

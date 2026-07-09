@@ -34,7 +34,7 @@ constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>
 // =============================================================================
 // Self-imposed max sequence length (input + output tokens). Model supports 128K.
 constexpr int MAX_SEQ_LEN = 2048;
-// Self-imposed max prompt length. Model allows up to 2048 for input + output.
+// Self-imposed max prompt length. Model allows up to 128K for input + output.
 constexpr int MAX_PROMPT_LEN = 512;
 // Number of sequences processed together. TODO: 改成运行时自适应
 constexpr int BATCH_SIZE = 16 * 8.5;
@@ -56,11 +56,11 @@ constexpr float ATTN_SCALE = 1.0f / SQRT_HEAD_DIM;
 // Widest per-token buffer we need (prefill length vs. batch width)
 constexpr int MAX_BUFFER_SIZE = std::max(MAX_PROMPT_LEN, BATCH_SIZE);
 // Bytes for one K (or V) block; BLOCK_BYTES doubles it for K and V together
-constexpr int V_OFFSET = BLOCK_SIZE * KV_DIM * sizeof(nv_bfloat16);
-constexpr int BLOCK_BYTES = V_OFFSET * 2; // * 2 because K and V
+constexpr size_t V_OFFSET = BLOCK_SIZE * KV_DIM * sizeof(nv_bfloat16);
+constexpr size_t BLOCK_BYTES = V_OFFSET * 2; // * 2 because K and V
 // Paging derived sizes
 constexpr int MAX_BLOCKS_PER_SEQ = MAX_SEQ_LEN / BLOCK_SIZE;  // 2048 / 16 = 128
-constexpr int NUM_BLOCKS = KV_CACHE_SIZE_BYTES / BLOCK_BYTES; // 2*1024^3 / (16*512*2*2) = 65536
+constexpr int NUM_BLOCKS = KV_CACHE_SIZE_BYTES / BLOCK_BYTES;
 constexpr int MAX_SEQUENCES = BATCH_SIZE;
 
 const std::filesystem::path model_path = std::filesystem::path("models");

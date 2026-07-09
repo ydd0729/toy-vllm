@@ -8,29 +8,23 @@
 #include <cublas_v2.h>
 #include "cuda_utils.hpp"
 #include <numeric>
+#include <limits>
 #include "kernels.cuh"
 #include "utils.hpp"
-
 
 using tokenizers::Tokenizer;
 
 constexpr size_t BF16 = sizeof(nv_bfloat16);
 constexpr size_t INPUT_TOKENS_BYTES = MAX_PROMPT_LEN * sizeof(int);
 constexpr size_t INPUT_EMBEDDINGS_BYTES = MAX_PROMPT_LEN * EMBEDDING_LENGTH * BF16;
-constexpr size_t HIDDEN_STATE_BYTES = MAX_BUFFER_SIZE * EMBEDDING_LENGTH * BF16;
-constexpr size_t RMS_NORMS_BYTES = MAX_BUFFER_SIZE * EMBEDDING_LENGTH * BF16;
-constexpr size_t BUF_2048_BYTES = MAX_BUFFER_SIZE * EMBEDDING_LENGTH * BF16;
-constexpr size_t K_PROJ_BYTES = MAX_PROMPT_LEN * KV_DIM * BF16;
-constexpr size_t V_PROJ_BYTES = MAX_PROMPT_LEN * KV_DIM * BF16;
+constexpr size_t BUFFER_EMBEDDING_PRODUCT_BYTES = MAX_BUFFER_SIZE * EMBEDDING_LENGTH * BF16;
+constexpr size_t KV_PROJ_BYTES = MAX_PROMPT_LEN * KV_DIM * BF16;
 constexpr size_t PREFILL_ATTN_SCORES_BYTES = MAX_PROMPT_LEN * MAX_PROMPT_LEN * NUM_Q_HEADS * BF16;
 constexpr size_t GATE_BYTES = MAX_BUFFER_SIZE * HIDDEN_DIM * BF16;
 constexpr size_t UP_BYTES = MAX_BUFFER_SIZE * HIDDEN_DIM * BF16;
 constexpr size_t EMBED_PROJ_BYTES = MAX_BUFFER_SIZE * VOCAB_SIZE * BF16;
-constexpr size_t LAST_TOKENS_BYTES = BATCH_SIZE * sizeof(int);
-constexpr size_t ACTIVE_SLOTS_BYTES = BATCH_SIZE * sizeof(int);
-constexpr size_t SEQ_LENS_BYTES = BATCH_SIZE * sizeof(int);
-constexpr size_t K_PROJ_BATCHED_BYTES = BATCH_SIZE * KV_DIM * BF16;
-constexpr size_t V_PROJ_BATCHED_BYTES = BATCH_SIZE * KV_DIM * BF16;
+constexpr size_t BATCH_INT_BYTES = BATCH_SIZE * sizeof(int);
+constexpr size_t KV_PROJ_BATCHED_BYTES = BATCH_SIZE * KV_DIM * BF16;
 // Element count kept separately: embed_proj_cpu is sized in elements, not bytes.
 constexpr size_t EMBED_PROJ_LEN = MAX_BUFFER_SIZE * VOCAB_SIZE;
 
@@ -69,19 +63,19 @@ InferenceContext::InferenceContext()
 
     CUDA_CHECK(cudaMalloc(&input_tokens, INPUT_TOKENS_BYTES));
     CUDA_CHECK(cudaMalloc(&input_embeddings, INPUT_EMBEDDINGS_BYTES));
-    CUDA_CHECK(cudaMalloc(&hidden_state, HIDDEN_STATE_BYTES));
-    CUDA_CHECK(cudaMalloc(&normed_hidden, RMS_NORMS_BYTES));
-    CUDA_CHECK(cudaMalloc(&scratch_a, BUF_2048_BYTES));
-    CUDA_CHECK(cudaMalloc(&scratch_b, BUF_2048_BYTES));
-    CUDA_CHECK(cudaMalloc(&key_states, std::max(K_PROJ_BYTES, K_PROJ_BATCHED_BYTES)));
-    CUDA_CHECK(cudaMalloc(&value_states, std::max(V_PROJ_BYTES, V_PROJ_BATCHED_BYTES)));
+    CUDA_CHECK(cudaMalloc(&hidden_state, BUFFER_EMBEDDING_PRODUCT_BYTES));
+    CUDA_CHECK(cudaMalloc(&normed_hidden, BUFFER_EMBEDDING_PRODUCT_BYTES));
+    CUDA_CHECK(cudaMalloc(&scratch_a, BUFFER_EMBEDDING_PRODUCT_BYTES));
+    CUDA_CHECK(cudaMalloc(&scratch_b, BUFFER_EMBEDDING_PRODUCT_BYTES));
+    CUDA_CHECK(cudaMalloc(&key_states, std::max(KV_PROJ_BYTES, KV_PROJ_BATCHED_BYTES)));
+    CUDA_CHECK(cudaMalloc(&value_states, std::max(KV_PROJ_BYTES, KV_PROJ_BATCHED_BYTES)));
     CUDA_CHECK(cudaMalloc(&attn_weights, PREFILL_ATTN_SCORES_BYTES));
     CUDA_CHECK(cudaMalloc(&gate, GATE_BYTES));
     CUDA_CHECK(cudaMalloc(&up, UP_BYTES));
     CUDA_CHECK(cudaMalloc(&logits, EMBED_PROJ_BYTES));
-    CUDA_CHECK(cudaMalloc(&last_tokens, LAST_TOKENS_BYTES));
-    CUDA_CHECK(cudaMalloc(&active_slots, ACTIVE_SLOTS_BYTES));
-    CUDA_CHECK(cudaMalloc(&seq_lens, SEQ_LENS_BYTES));
+    CUDA_CHECK(cudaMalloc(&last_tokens, BATCH_INT_BYTES));
+    CUDA_CHECK(cudaMalloc(&active_slots, BATCH_INT_BYTES));
+    CUDA_CHECK(cudaMalloc(&seq_lens, BATCH_INT_BYTES));
 
     tok = load_tokenizer();
 }
@@ -104,6 +98,12 @@ InferenceContext::~InferenceContext()
     CUDA_CHECK_NOTHROW(cudaFree(last_tokens));
     CUDA_CHECK_NOTHROW(cudaFree(active_slots));
     CUDA_CHECK_NOTHROW(cudaFree(seq_lens));
+}
+
+std::string InferenceContext::apply_chat_template(const std::string& user_msg)
+{
+    return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" + user_msg +
+           "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
 }
 
 void InferenceContext::copyInputTokensToGPU()
@@ -440,16 +440,12 @@ void PagedKVCache::cacheKV(int physical_block,
 
 BatchState::BatchState()
     : is_slot_free(BATCH_SIZE, true), generated_tokens(BATCH_SIZE),
-      last_generated_tokens(BATCH_SIZE), current_prompt_len(BATCH_SIZE, 0),
-      request_id(BATCH_SIZE, -1), input_tokens(BATCH_SIZE), input_message(BATCH_SIZE)
+      last_generated_tokens(BATCH_SIZE), current_prompt_len(BATCH_SIZE, 0), requests(BATCH_SIZE)
+
 {
 }
 
-std::string apply_chat_template(const std::string& user_msg)
-{
-    return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" + user_msg +
-           "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
-}
+
 
 /**
  * @brief Prefill 阶段：一次性处理整个 prompt，填充 KV Cache 并生成第一个 token
@@ -470,25 +466,19 @@ std::string apply_chat_template(const std::string& user_msg)
  * @param bs            batch 状态，跟踪各 slot 的占用情况与请求 id（is_slot_free / request_id）
  * @param w             模型权重，提供 embedding、各层投影/归一化及输出层的 GPU 指针
  */
-void prefill(std::queue<std::string>& input_queue,
+void prefill(std::queue<Request>& request_queue,
              int slot,
              InferenceContext& ctx,
              PagedKVCache& pkv,
              BatchState& bs,
              Weights& w)
 {
-    std::string msg = std::move(input_queue.front());
-    input_queue.pop();
-    std::vector<int> input_tokens = ctx.tok->Encode(apply_chat_template(msg));
-
-    bs.input_message[slot] = msg;
-    bs.input_tokens[slot] = input_tokens;
-    // 标记当前 batch slot 为已占用，防止其他 prompt 被分配到同一 slot
+    Request r = std::move(request_queue.front());
+    request_queue.pop();
+    bs.requests[slot] = r;
     bs.is_slot_free[slot] = false;
-    // 记录该 slot 装的是第几个请求（对应 PROMPT N），用于把输出对应回提问
-    bs.request_id[slot] = bs.next_request_id++;
 
-    ctx.setInputTokens(input_tokens);
+    ctx.setInputTokens(bs.requests[slot].input_tokens);
     ctx.copyInputTokensToGPU();
 
     // 对 prompt 中的每个 token 获取 embedding ，并保存到 input_embeddings 中
@@ -642,8 +632,11 @@ void prefill(std::queue<std::string>& input_queue,
  * token、序列长度、slot 释放）
  * @param w    模型权重，提供 embedding、各层投影/归一化及输出层的 GPU 指针
  */
-std::vector<RequestOutput>
-decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
+std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
+                                  InferenceContext& ctx,
+                                  PagedKVCache& pkv,
+                                  BatchState& bs,
+                                  Weights& w)
 {
     std::vector<RequestOutput> out;
     int num_active_slots = bs.active_slots.size();
@@ -682,8 +675,8 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
             int active_slot = bs.active_slots[slot];
             ropeDecodeRotateHalf(&ctx.query_states[slot * EMBEDDING_LENGTH],
                                  bs.current_prompt_len[active_slot], EMBEDDING_LENGTH);
-            ropeDecodeRotateHalf(ctx.key_states + slot * KV_DIM,
-                                 bs.current_prompt_len[active_slot], KV_DIM);
+            ropeDecodeRotateHalf(ctx.key_states + slot * KV_DIM, bs.current_prompt_len[active_slot],
+                                 KV_DIM);
         }
 
         // PagedAttention：把每个活跃序列这一步的新 K/V 散射进各自 KV cache 的下一个位置
@@ -760,9 +753,9 @@ decode(InferenceContext& ctx, PagedKVCache& pkv, BatchState& bs, Weights& w)
         if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID ||
             bs.current_prompt_len[active_slot] == MAX_SEQ_LEN - 1)
         {
-            out.emplace_back(bs.request_id[active_slot], bs.input_message[active_slot],
+            out.emplace_back(bs.requests[active_slot],
                              ctx.tok->Decode(bs.generated_tokens[active_slot]),
-                             bs.input_tokens[active_slot], bs.generated_tokens[active_slot]);
+                             bs.generated_tokens[active_slot]);
 
             bs.is_slot_free[active_slot] = true;
             for (int layer = 0; layer < N_LAYERS; ++layer)

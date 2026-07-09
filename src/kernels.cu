@@ -432,7 +432,7 @@ __global__ void softmaxKernel(nv_bfloat16* input, int num_tokens)
     {
         if (threadIdx.x % (i * 2) == 0 && threadIdx.x + i < num_tokens)
         {
-            row[threadIdx.x] = row[threadIdx.x] + row[threadIdx.x + i];
+            row[threadIdx.x] += row[threadIdx.x + i];
         }
         __syncthreads();
     }
@@ -814,12 +814,13 @@ __global__ void pagedAttentionKernel(int layer,
         int tokens_in_block = min(seq_len - logical_block_idx * BLOCK_SIZE, BLOCK_SIZE);
         for (int token = 0; token < tokens_in_block; ++token)
         {
-            nv_bfloat16* k = (nv_bfloat16*) ((char*) kv_cache + physical_block * BLOCK_BYTES +
+            size_t block_offset = (size_t) physical_block * BLOCK_BYTES;
+            nv_bfloat16* k = (nv_bfloat16*) ((char*) kv_cache + block_offset +
                                              token * KV_DIM * sizeof(nv_bfloat16) +
                                              kv_head_idx * HEAD_DIM * sizeof(nv_bfloat16) +
                                              thread_id * sizeof(nv_bfloat16));
-            nv_bfloat16* v = (nv_bfloat16*) ((char*) kv_cache + physical_block * BLOCK_BYTES +
-                                             V_OFFSET + token * KV_DIM * sizeof(nv_bfloat16) +
+            nv_bfloat16* v = (nv_bfloat16*) ((char*) kv_cache + block_offset + V_OFFSET +
+                                             token * KV_DIM * sizeof(nv_bfloat16) +
                                              kv_head_idx * HEAD_DIM * sizeof(nv_bfloat16) +
                                              thread_id * sizeof(nv_bfloat16));
             float qk = (float) q * (float) *k;

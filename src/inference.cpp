@@ -739,6 +739,30 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
         return out;
     }
 
+    for (int active_slot : bs.active_slots)
+    {
+        int seq_len = bs.current_prompt_len[active_slot];
+        if (seq_len % BLOCK_SIZE != 0)
+        {
+            continue;
+        }
+
+        int logical_block_idx = seq_len / BLOCK_SIZE;
+        for (int layer = 0; layer < N_LAYERS; ++layer)
+        {
+            int physical_block_idx = pkv.getFreePhysicalBlock();
+            if (physical_block_idx == -1)
+            {
+                UNREACHABLE("eviction above should have guaranteed enough free blocks");
+            }
+            pkv.setPhysicalBlock(active_slot, layer, logical_block_idx, physical_block_idx);
+        }
+    }
+
+    CUDA_CHECK(cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
+                          MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
+                          cudaMemcpyHostToDevice));
+
     // copy useful data to gpu
     CUDA_CHECK(cudaMemcpy(ctx.last_tokens, bs.active_tokens.data(), num_active_slots * sizeof(int),
                           cudaMemcpyHostToDevice));
@@ -791,12 +815,7 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
             int physical_block_idx = pkv.getPhysicalBlock(active_slot, layer, logical_block_idx);
             if (physical_block_idx == -1)
             {
-                physical_block_idx = pkv.getFreePhysicalBlock();
-                if (physical_block_idx == -1)
-                {
-                    UNREACHABLE("physical_block_idx should not be -1");
-                }
-                pkv.setPhysicalBlock(active_slot, layer, logical_block_idx, physical_block_idx);
+                UNREACHABLE("physical block must have been allocated before the layer loop");
             }
 
             // 该 slot 的新 token K/V（已 RoPE，位于 ctx.key/value_states 第 slot
@@ -804,12 +823,6 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
             pkv.cacheKV(physical_block_idx, ctx.key_states, ctx.value_states, slot, 1,
                         token_in_block_idx);
         }
-
-        // TODO:
-        // synchronize block table on cpu with block table on gpu (for attention)
-        CUDA_CHECK(cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
-                              MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
-                              cudaMemcpyHostToDevice));
 
         // 注意力输出写入 ctx.context（= scratch_a），供 oProj 读取
         ctx.context = ctx.scratch_a;
@@ -833,13 +846,14 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
     ctx.lmHead(w.embed_tokens);
 
     argMax(ctx.logits, ctx.arg_max_idx, num_active_slots);
-    CUDA_CHECK(cudaMemcpy(ctx.arg_max_idx_cpu.data(), ctx.arg_max_idx, sizeof(int) * num_active_slots, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(ctx.arg_max_idx_cpu.data(), ctx.arg_max_idx,
+                          sizeof(int) * num_active_slots, cudaMemcpyDeviceToHost));
 
     for (int i = 0; i < num_active_slots; ++i)
     {
         int active_slot = bs.active_slots[i];
         int max_token_idx = ctx.arg_max_idx_cpu[i];
-        
+
         if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID ||
             bs.current_prompt_len[active_slot] == MAX_SEQ_LEN - 1)
         {
@@ -849,11 +863,6 @@ std::vector<RequestOutput> decode(std::queue<Request>& request_queue,
 
             bs.is_slot_free[active_slot] = true;
             pkv.freeBlocks(active_slot);
-
-            // TODO:
-            CUDA_CHECK(cudaMemcpy(pkv.block_table_gpu, pkv.block_table.data(),
-                                  MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int),
-                                  cudaMemcpyHostToDevice));
         }
         else
         {
